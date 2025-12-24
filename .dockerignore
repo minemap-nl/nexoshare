@@ -1,0 +1,35 @@
+# Negeer dependencies (deze installeren we vers in de container)
+node_modules
+*/node_modules
+**/node_modules
+
+# Negeer builds (deze bouwen we in de container)
+dist
+*/dist
+build
+*/build
+
+# Negeer uploads (we willen geen lokale testbestanden in productie)
+uploads
+backend/uploads
+*/uploads
+
+# Negeer logs en debug files
+npm-debug.log
+logs
+*.log
+
+# Negeer versiebeheer en IDE instellingen
+.git
+.gitignore
+.vscode
+.idea
+
+# Negeer environment files (deze gaan via Docker Env vars)
+.env
+.env.*
+
+# Negeer Docker files zelf (niet nodig IN de container)
+Dockerfile
+docker-compose.yml
+.dockerignore

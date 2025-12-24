@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+  <meta charset="UTF-8" />
+  <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Nexo share</title>
+  
+  <!-- SSO Auto-Redirect Script - MOET VOOR REACT LADEN -->
+  <script>
+    (function() {
+      // Check of we op login pagina zijn
+      if (window.location.pathname === '/login') {
+        const params = new URLSearchParams(window.location.search);
+        const noRedirect = params.get('noredirect');
+        const nonce = params.get('nonce');
+        
+        // Als er geen noredirect of nonce parameter is, check config
+        if (!noRedirect && !nonce) {
+          // Probeer config uit localStorage (cache)
+          const cachedConfig = localStorage.getItem('sso_config_cache');
+          
+          if (cachedConfig) {
+            try {
+              const config = JSON.parse(cachedConfig);
+              if (config.ssoEnabled && config.ssoAutoRedirect) {
+                // Redirect DIRECT zonder te wachten op React
+                const apiUrl = window.location.origin + '/api';
+                window.location.href = apiUrl + '/auth/sso';
+              }
+            } catch (e) {
+              console.error('SSO cache parse error:', e);
+            }
+          }
+        }
+      }
+    })();
+  </script>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="module" src="/src/main.tsx"></script>
+</body>
+</html>
