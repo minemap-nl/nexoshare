@@ -28,6 +28,7 @@
   <li>
     <a href="#about-the-project">About The Project</a>
     <ul>
+      <li><a href="#screenshots">Screenshots</a></li>
       <li><a href="#built-with">Built With</a></li>
     </ul>
   </li>
@@ -52,6 +53,16 @@
 **Nexo Share** is designed as a secure alternative to public file transfer services. It allows you to host your own file-sharing platform while retaining full control over your data.
 
 Unlike many standard open-source solutions, Nexo Share focuses heavily on security-first features such as **mandatory 2FA**, **passkey authentication**, and **ClamAV virus scanning**, while still offering user-friendly workflows like **Reverse Shares** that allow external users to send files to you without creating an account.
+
+### Screenshots
+
+<div align="center">
+  <img src="./screenshots/screenshot1.png" alt="Dashboard Screenshot" width="45%" />
+  <img src="./screenshots/screenshot2.png" alt="Sharing Screenshot" width="45%" />
+  <br/>
+  <img src="./screenshots/screenshot3.png" alt="Admin Screenshot" width="45%" />
+  <img src="./screenshots/screenshot4.png" alt="Mobile Screenshot" width="45%" />
+</div>
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
