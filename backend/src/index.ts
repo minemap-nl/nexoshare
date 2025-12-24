@@ -3775,8 +3775,8 @@ async function initDB() {
                 if (adminCheck.rows && adminCheck.rows.length > 0) {
                     if (parseInt(adminCheck.rows[0].count) === 0) {
                         const hash = await bcrypt.hash('admin123', 10);
-                        await client.query(`INSERT INTO users (email, password_hash, name, is_admin) VALUES ($1, $2, $3, $4)`, ['admin@Nexo share.com', hash, 'Super Admin', true]);
-                        console.log('✅ DB Initialized & Healed. Login: admin@Nexo share.com / admin123');
+                        await client.query(`INSERT INTO users (email, password_hash, name, is_admin) VALUES ($1, $2, $3, $4)`, ['admin@nexoshare.com', hash, 'Super Admin', true]);
+                        console.log('✅ DB Initialized & Healed. Login: admin@nexoshare.com / admin123');
                     } else {
                         console.log('✅ DB Ready & Up-to-date');
                     }
