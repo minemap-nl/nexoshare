@@ -52,7 +52,7 @@
 
 **Nexo Share** is designed as a secure alternative to public file transfer services. It allows you to host your own file-sharing platform while retaining full control over your data.
 
-Unlike many standard open-source solutions, Nexo Share focuses heavily on security-first features such as **mandatory 2FA**, **passkey authentication**, and **ClamAV virus scanning**, while still offering user-friendly workflows like **Reverse Shares** that allow external users to send files to you without creating an account.
+Unlike many standard open-source solutions, Nexo Share focuses heavily on security-first features such as **(mandatory) 2FA**, **passkey authentication**, and **ClamAV virus scanning**, while still offering user-friendly workflows like **Reverse Shares** that allow external users to send files to you without creating an account.
 
 ### Screenshots
 
