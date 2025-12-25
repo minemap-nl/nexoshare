@@ -101,7 +101,7 @@ fs.mkdir(TEMP_DIR, { recursive: true }).catch(() => {});
 const pool = new Pool({
   host: process.env.DB_HOST || 'localhost',
   port: parseInt(process.env.DB_PORT || '5432'),
-  database: process.env.DB_NAME || 'Nexo share',
+  database: process.env.DB_NAME || 'Nexo Share',
   user: process.env.DB_USER || 'postgres',
   password: process.env.DB_PASSWORD,
   max: 20,
@@ -122,7 +122,7 @@ pool.on('error', (err) => {
 const CLAMAV_HOST = process.env.CLAMAV_HOST || 'clamav';
 const CLAMAV_PORT = parseInt(process.env.CLAMAV_PORT || '3310');
 // WebAuthn Configuration
-const RP_NAME = 'Nexo share';
+const RP_NAME = 'Nexo Share';
 const RP_ID = process.env.RP_ID || 'localhost';
 const ORIGIN = process.env.ORIGIN || 'http://localhost:5173';
 
@@ -580,7 +580,7 @@ async function getConfig() {
         const res = await pool.query('SELECT data, setup_completed FROM config WHERE id = 1');
         
         const defaults = {
-            appName: 'Nexo share',
+            appName: 'Nexo Share',
             appUrl: 'http://localhost:3000',
             sessionVal: 7, sessionUnit: 'Days',
             secureCookies: false,
@@ -765,7 +765,7 @@ async function sendEmail(to: string, subject: string, rawMessage: string, ctaLin
             tls: { rejectUnauthorized: false }
         });
 
-        const appName = config.appName || 'Nexo share';
+        const appName = config.appName || 'Nexo Share';
         // Sanitize de naam voor gebruik in headers om injection te voorkomen
         const safeHeaderAppName = sanitizeEmailHeader(appName);
         const safeAppName = escapeHtml(appName);
@@ -1183,7 +1183,7 @@ apiRouter.post('/auth/2fa/setup', authenticateToken, async (req, res) => {
         const config = await getConfig();
         
         const secret = speakeasy.generateSecret({
-            name: `${config.appName || 'Nexo share'} (${authReq.user!.email})`,
+            name: `${config.appName || 'Nexo Share'} (${authReq.user!.email})`,
             length: 32
         });
         
@@ -1322,7 +1322,7 @@ apiRouter.post('/passkeys/register/options', authenticateToken, async (req, res)
         const rpID = new URL(baseUrl).hostname; // Pakt alleen 'wetransfer.famretera.nl'
         
         const options = await generateRegistrationOptions({
-            rpName: config.appName || 'Nexo share',
+            rpName: config.appName || 'Nexo Share',
             rpID: rpID, // Dynamisch!
             userID: Buffer.from(user.rows[0].id.toString()).toString('base64url'), 
             userName: user.rows[0].email,
@@ -2024,9 +2024,9 @@ apiRouter.post('/config/test-email', async (req, res) => {
 
         const config = await getConfig();
         await transporter.sendMail({
-            from: `"${config.appName || 'Nexo share'}" <${smtpFrom || smtpUser}>`,
+            from: `"${config.appName || 'Nexo Share'}" <${smtpFrom || smtpUser}>`,
             to: testEmail,
-            subject: `Test Email from ${config.appName || 'Nexo share'}`,
+            subject: `Test Email from ${config.appName || 'Nexo Share'}`,
             html: `<div style="font-family: sans-serif; padding: 20px; background: #f3f4f6; border-radius: 8px;">
                     <h2 style="color: #7c3aed; margin-top: 0;">Success! 🎉</h2>
                     <p>Your SMTP settings are correct.</p>
@@ -2420,72 +2420,30 @@ apiRouter.post('/shares/:id/chunk', authenticateToken, uploadLimiter, chunkUploa
     
     if (!req.file) return res.status(400).json({ error: 'No data' });
 
-    // 1: Path Traversal preventie
-    // Gebruik path.basename() zodat "foo/../../evil.js" verandert in "evil.js"
+    // UNIEKE NAAM: Opslaan als .part bestand om corruptie te voorkomen
     const safeFileName = path.basename(fileName);
-    
-    // Doelbestand (het samengestelde bestand)
-    const targetFilePath = path.join(TEMP_DIR, `${id}_${fileId}_${safeFileName}`);
+    const partFilePath = path.join(TEMP_DIR, `${id}_${fileId}_${safeFileName}.part_${chunkIndex}`);
 
     try {
-        // Valideer totale bestandsgrootte van het doelbestand
-        let currentSize = 0;
-        try {
-            const stats = await fs.stat(targetFilePath);
-            currentSize = stats.size;
-        } catch(e) {
-            // Bestand bestaat nog niet
-        }
-        
         const config = await getConfig();
         const maxBytes = getBytes(config.maxSizeVal || 10, config.maxSizeUnit || 'GB');
 
-        // Check bij de start van een bestand of de TOTALE share grootte niet wordt overschreden.
-        // Anders kan iemand 10x een bestand van 1GB uploaden terwijl de limiet 2GB is.
+        // Check limiet alleen bij eerste chunk (bespaart DB calls)
         if (parseInt(chunkIndex) === 0) {
             const usageRes = await pool.query('SELECT COALESCE(SUM(size), 0) as total FROM files WHERE share_id = $1', [id]);
             const currentTotal = parseInt(usageRes.rows[0].total);
             if (currentTotal + req.file.size > maxBytes) {
                 await fs.unlink(req.file.path).catch(() => {});
-                return res.status(413).json({ error: `Share limit exceeded. Max: ${config.maxSizeVal}${config.maxSizeUnit}` });
+                return res.status(413).json({ error: `Share limit exceeded.` });
             }
         }
-        
-        if (currentSize + req.file.size > maxBytes) {
-            // Verwijder de zojuist geüploade chunk van disk
-            await fs.unlink(req.file.path).catch(() => {});
-            // Cleanup incomplete target file
-            await fs.unlink(targetFilePath).catch(() => {});
-            return res.status(413).json({ error: `File too large. Maximum is ${config.maxSizeVal} ${config.maxSizeUnit}` });
-        }
 
-        // 2: Memory Exhaustion preventie (Streams)
-        // We moeten 'fs' (niet promises) importeren voor streams
-        const { createReadStream, createWriteStream } = require('fs');
-        const flags = parseInt(chunkIndex) === 0 ? 'w' : 'a';
-
-        await new Promise((resolve, reject) => {
-            // req.file!.path komt van Multer diskStorage, dus die bestaat op disk
-            const source = createReadStream(req.file!.path);
-            const dest = createWriteStream(targetFilePath, { flags });
-            source.on('error', reject);
-            dest.on('error', reject);
-            dest.on('finish', resolve);
-            source.pipe(dest);
-        });
-
-        // Verwijder de tijdelijke chunk file direct na gebruik
-        await fs.unlink(req.file.path).catch(() => {});
+        // Verplaats naar .part bestand (overschrijft veilig bij retry)
+        await fs.rename(req.file.path, partFilePath);
 
         res.json({ success: true });
     } catch (e) {
-        // Ruim de chunk op bij errors
-        if (req.file) {
-            await fs.unlink(req.file.path).catch(() => {});
-            // Correctie pending bytes bij error (anders blijft limiet 'vol' hangen)
-            const val = pendingUploads.get(id);
-            if (val) pendingUploads.set(id, Math.max(0, val - req.file.size));
-        }
+        if (req.file) await fs.unlink(req.file.path).catch(() => {});
         console.error('Chunk error:', e);
         res.status(500).json({ error: 'Chunk write failed' });
     }
@@ -2494,7 +2452,7 @@ apiRouter.post('/shares/:id/chunk', authenticateToken, uploadLimiter, chunkUploa
 // STAP 3: Finalize (Verplaatsen, Scannen, Database, Email)
 apiRouter.post('/shares/:id/finalize', authenticateToken, async (req, res) => {
     const { id } = req.params;
-    const { files } = req.body; // Array van { fileName, fileId, originalName, mimeType, size }
+    const { files } = req.body; 
     const authReq = req as AuthRequest;
     
     const client = await pool.connect();
@@ -2505,61 +2463,69 @@ apiRouter.post('/shares/:id/finalize', authenticateToken, async (req, res) => {
 
         const checkOwner = await client.query('SELECT user_id FROM shares WHERE id = $1', [id]);
         if (checkOwner.rows.length === 0) throw new Error('Share not found');
-        if (checkOwner.rows[0].user_id !== authReq.user!.id) throw new Error('Access denied to this share');
+        if (checkOwner.rows[0].user_id !== authReq.user!.id) throw new Error('Access denied');
 
         await client.query('BEGIN');
 
+        // FUNCTIE OM LOSSE DELEN SAMEN TE VOEGEN
+        const mergeParts = async (fileName: string, fileId: string, totalChunks: number, finalPath: string) => {
+            const { createReadStream, createWriteStream } = require('fs');
+            const dest = createWriteStream(finalPath);
+            
+            for (let i = 0; i < totalChunks; i++) {
+                const partPath = path.join(TEMP_DIR, `${id}_${fileId}_${fileName}.part_${i}`);
+                try { await fs.access(partPath); } catch { dest.end(); throw new Error(`Missing part ${i} of ${fileName}`); }
+
+                await new Promise((resolve, reject) => {
+                    const source = createReadStream(partPath);
+                    source.on('error', reject);
+                    source.pipe(dest, { end: false });
+                    source.on('end', resolve);
+                });
+                await fs.unlink(partPath).catch(() => {}); // Opruimen
+            }
+            dest.end();
+            await new Promise(resolve => dest.on('finish', resolve));
+        };
+
         for (const f of files) {
-            const tempPath = path.join(TEMP_DIR, `${id}_${f.fileId}_${f.fileName}`);
-            const safeExt = path.extname(path.basename(f.fileName)); // ✅ Dubbele sanitizatie
+            const safeFileName = path.basename(f.fileName);
+            const safeExt = path.extname(safeFileName);
             const finalPath = path.join(shareDir, crypto.randomBytes(8).toString('hex') + safeExt);
             
-            // Check of temp file bestaat
-            try {
-                await fs.access(tempPath);
-            } catch {
-                throw new Error(`File ${f.fileName} is incomplete or corrupt.`);
-            }
+            // Bereken chunks voor merge
+            const k = 1024;
+            const sizeMap: any = { 'KB': k, 'MB': k*k, 'GB': k*k*k, 'TB': k*k*k*k };
+            const chunkSizeVal = config.chunkSizeVal || 50;
+            const chunkSizeUnit = config.chunkSizeUnit || 'MB';
+            const CHUNK_SIZE = chunkSizeVal * (sizeMap[chunkSizeUnit] || sizeMap['MB']);
+            const totalChunks = Math.ceil(f.size / CHUNK_SIZE);
 
-            // --- VIRUSSCAN ---
+            await mergeParts(safeFileName, f.fileId, totalChunks, finalPath);
+
+            // VIRUSSCAN
             if (clamscanInstance) {
-                try {
-                    const result = await clamscanInstance.isInfected(tempPath);
-                    if (result.isInfected) {
-                        await fs.unlink(tempPath).catch(() => {});
-                        throw new Error(`Virus detected in ${f.originalName}!`);
-                    }
-                } catch (e: any) {
-                    if (e.message.includes('Virus')) throw e;
-                    console.warn('Scan warning:', e);
-                    // Voeg hier eventueel ook een check toe als scannen MOET lukken bij errors
-                    if (config.clamavMustScan) throw new Error("Virus scanner error and scanning is mandatory."); 
+                const result = await clamscanInstance.isInfected(finalPath);
+                if (result.isInfected) {
+                    await fs.unlink(finalPath).catch(() => {});
+                    throw new Error(`Virus detected in ${f.originalName}!`);
                 }
             } else if (config.clamavMustScan) {
-                // --- Blokkeer als scanner offline is maar wel verplicht ---
-                await fs.unlink(tempPath).catch(() => {}); // Ruim temp bestand op
-                console.error("⛔ Upload blocked: ClamAV is offline, but 'Enforce Virus Scan' is turned on.");
-                throw new Error("Security error: Virus scanner unavailable, upload refused.");
+                await fs.unlink(finalPath).catch(() => {}); 
+                throw new Error("Virus scanner unavailable, upload refused.");
             }
 
-            // Verplaats van temp naar final
-            await fs.rename(tempPath, finalPath);
-
-            // Sanitize de originalName voordat deze de DB in gaat
             const safeOriginalName = sanitizeFilename(f.originalName);
-
-            // Insert file record
             await client.query(`INSERT INTO files (share_id, filename, original_name, size, mime_type, storage_path) VALUES ($1, $2, $3, $4, $5, $6)`, 
                 [id, path.basename(finalPath), safeOriginalName, f.size, f.mimeType, finalPath]);
         }
 
-        // Haal share info op voor email
         const shareRes = await client.query('SELECT * FROM shares WHERE id = $1', [id]);
         const share = shareRes.rows[0];
 
         await client.query('COMMIT');
 
-        // Emails versturen (In try-catch zodat upload niet faalt als mail faalt)
+        // Emails
         if (share.recipients) {
             try {
                 const list = validateAndSplitEmails(share.recipients);
@@ -2573,18 +2539,10 @@ apiRouter.post('/shares/:id/finalize', authenticateToken, async (req, res) => {
                         ${share.message ? escapeHtml(share.message).replace(/\n/g, '<br>') : 'No message was added.'}
                         </div>`, url, 'Download Files');
                 }
-            } catch (mailErr) {
-                console.error("⚠️ Sending email failed, but share was created:", mailErr);
-                // We gooien de error NIET omhoog, zodat de client gewoon 'success' krijgt
-            }
+            } catch (mailErr) { console.error("Email failed:", mailErr); }
         }
 
-        await logAudit(authReq.user!.id, 'share_created', 'share', id, req, {
-            fileCount: files.length,
-            totalSize: files.reduce((acc: number, f: any) => acc + f.size, 0),
-            expiresAt: share.expires_at
-        });
-
+        await logAudit(authReq.user!.id, 'share_created', 'share', id, req, { fileCount: files.length });
         res.json({ success: true, shareUrl: `${config.appUrl || 'http://localhost:5173'}/s/${id}` });
 
     } catch (e: any) {
@@ -2744,65 +2702,66 @@ apiRouter.post('/shares/:id/resend', authenticateToken, async (req, res) => {
 });
 
 apiRouter.get('/shares/:id/download', downloadLimiter, async (req, res) => {
-    // Wacht op een plekje in de queue
-    try {
-        await zipQueue.wait();
-    } catch (e) {
-        return res.status(503).send('Server too busy, please try again later.');
-    }
+    // 1. Queue Beheer
+    try { await zipQueue.wait(); } catch (e) { return res.status(503).send('Server too busy.'); }
 
-    // Zorg dat we de queue maar 1 keer vrijgeven per request (voorkomt dubbele telling)
     let released = false;
     const release = () => { if (!released) { released = true; zipQueue.release(); } };
-
-    res.on('finish', release);
-    res.on('close', release);
-    res.on('error', release);
+    res.on('finish', release); res.on('close', release); res.on('error', release);
 
     try {
         const { id } = req.params;
-        const cookieName = `dl_${id}`;
+        const dlCookieName = `dl_${id}`; // Cookie voor teller
+        const authCookieName = `share_auth_${id}`; // Cookie voor beveiliging
         const cookies = parseCookies(req);
-        const hasDownloaded = cookies[cookieName];
 
-        // Stap 1: Check of share bestaat en geldig is
+        // 2. Haal share info op inclusief password_hash
         const shareCheck = await pool.query(
-            'SELECT max_downloads, download_count, expires_at FROM shares WHERE id = $1',
+            'SELECT max_downloads, download_count, expires_at, password_hash FROM shares WHERE id = $1',
             [id]
         );
         
-        if (shareCheck.rows.length === 0) return res.status(404).send('Share not found');
+        if (shareCheck.rows.length === 0) { release(); return res.status(404).send('Share not found'); }
         const share = shareCheck.rows[0];
-        
-        if (share.expires_at && new Date() > new Date(share.expires_at)) {
-            return res.status(410).json({ error: 'Share has Expired' });
+
+        // 3. BEVEILIGINGS CHECK: Als er een wachtwoord op zit, check het cookie
+        if (share.password_hash) {
+            const authCookie = cookies[authCookieName];
+            if (!authCookie) { release(); return res.status(403).send('Access Denied: Password required.'); }
+            
+            try {
+                const decoded: any = jwt.verify(authCookie, JWT_SECRET);
+                if (decoded.shareId !== id) throw new Error('Mismatch');
+            } catch (e) {
+                release(); return res.status(403).send('Access Denied: Session expired or invalid.');
+            }
         }
 
-        // Stap 2: Teller logica
+        // 4. Expiratie Check
+        if (share.expires_at && new Date() > new Date(share.expires_at)) {
+            release(); return res.status(410).json({ error: 'Share has Expired' });
+        }
+
+        // 5. Download Teller
+        const hasDownloaded = cookies[dlCookieName];
         if (!hasDownloaded) {
             const updateRes = await pool.query(
-                `UPDATE shares 
-                 SET download_count = download_count + 1 
-                 WHERE id = $1 
-                 AND (max_downloads IS NULL OR download_count < max_downloads)
-                 RETURNING download_count`,
-                [id]
+                `UPDATE shares SET download_count = download_count + 1 
+                 WHERE id = $1 AND (max_downloads IS NULL OR download_count < max_downloads)
+                 RETURNING download_count`, [id]
             );
-
-            if (updateRes.rows.length === 0) {
-                return res.status(410).end();
-            }
-            res.cookie(cookieName, '1', { httpOnly: true, sameSite: 'lax' });
+            if (updateRes.rows.length === 0) { release(); return res.status(410).end(); }
+            res.cookie(dlCookieName, '1', { httpOnly: true, sameSite: 'lax' });
         } else {
             if (share.max_downloads && share.download_count >= share.max_downloads) {
-                // Optioneel: Blokkeer alsnog als limiet bereikt is
+                 // Optioneel: blokkeer als teller cookie er is maar max is bereikt
             }
         }
         
-        // Stap 3: ZIP Genereren
+        // 6. ZIP Genereren
         const config = await getConfig();
         const files = (await pool.query('SELECT * FROM files WHERE share_id = $1', [id])).rows;
-        if(files.length === 0) return res.status(404).send('Empty');
+        if(files.length === 0) { release(); return res.status(404).send('Empty'); }
 
         const totalSize = files.reduce((acc: number, f: any) => acc + parseInt(f.size), 0);
         const useCompression = totalSize < 100 * 1024 * 1024;
@@ -2813,39 +2772,30 @@ apiRouter.get('/shares/:id/download', downloadLimiter, async (req, res) => {
         });
 
         res.setHeader('Content-Type', 'application/zip');
-
         res.attachment(`${id}.zip`);
         archive.pipe(res);
 
         const usedNames = new Set<string>();
-
         files.forEach(f => {
             const isMedia = config.zipNoMedia && (f.mime_type?.startsWith('image') || f.mime_type?.startsWith('video') || f.mime_type?.startsWith('audio'));
             const shouldStore = !useCompression || isMedia;
-
             let entryName = f.original_name;
-
             if (usedNames.has(entryName)) {
                 let counter = 1;
                 const ext = path.extname(entryName);
                 const base = path.basename(entryName, ext);
-                while (usedNames.has(`${base} (${counter})${ext}`)) {
-                    counter++;
-                }
+                while (usedNames.has(`${base} (${counter})${ext}`)) counter++;
                 entryName = `${base} (${counter})${ext}`;
             }
             usedNames.add(entryName);
-
             archive.file(f.storage_path, { name: entryName, store: shouldStore } as archiver.EntryData);
         });
         
-        // Audit log
         await logAudit(null, 'download_zip', 'share', id, req, { size: totalSize });
-        
         await archive.finalize();
 
     } catch (e: any) {
-        release(); // Gebruik de veilige release functie
+        release();
         console.error('Download error:', e);
         if (!res.headersSent) res.status(500).send('Download failed');
     }
@@ -3074,130 +3024,62 @@ apiRouter.get('/public/shares/:id', publicLimiter, async (req, res) => {
 });
 
 apiRouter.post('/shares/:id/verify', loginLimiter, async (req, res) => {
-    const result = await pool.query('SELECT password_hash FROM shares WHERE id = $1', [req.params.id]);
+    const { id } = req.params;
+    const result = await pool.query('SELECT password_hash FROM shares WHERE id = $1', [id]);
+    
     if (result.rows.length === 0) return res.status(404).json({ error: 'Not found' });
+    
     const valid = await bcrypt.compare(req.body.password, result.rows[0].password_hash);
+    
     if (valid) {
+        // Maak een token aan dat bewijst dat dit IP/User het wachtwoord kent voor DEZE share
+        const accessPayload = { shareId: id, authorized: true };
+        const accessToken = jwt.sign(accessPayload, JWT_SECRET, { expiresIn: '1h' }); // 1 uur geldig
+
+        const config = await getConfig();
+        const isProduction = process.env.NODE_ENV === 'production';
+        const forceSecure = config.secureCookies || (config.appUrl && config.appUrl.startsWith('https://'));
+
+        // Zet een HTTP-Only cookie die specifiek is voor deze share
+        res.cookie(`share_auth_${id}`, accessToken, { 
+            httpOnly: true, 
+            secure: isProduction ? forceSecure : false, 
+            sameSite: 'lax', // Lax is nodig zodat de cookie wordt meegestuurd bij normale link-navigatie (downloaden)
+            maxAge: 3600000 // 1 uur
+        });
+
         const files = (await pool.query('SELECT id, original_name, size, mime_type FROM files WHERE share_id = $1', [req.params.id])).rows;
         res.json({ valid: true, files });
-    } else res.json({ valid: false });
-});
-
-apiRouter.get('/shares/:id/download', downloadLimiter, async (req, res) => {
-    // Wacht op een plekje in de queue
-    try {
-        await zipQueue.wait();
-    } catch (e) {
-        return res.status(503).send('Server too busy, please try again later.');
-    }
-
-    // Zorg dat we de queue maar 1 keer vrijgeven per request (voorkomt dubbele telling)
-    let released = false;
-    const release = () => { if (!released) { released = true; zipQueue.release(); } };
-
-    res.on('finish', release);
-    res.on('close', release);
-    res.on('error', release);
-
-    try {
-        const { id } = req.params;
-        const cookieName = `dl_${id}`;
-        const cookies = parseCookies(req);
-        const hasDownloaded = cookies[cookieName];
-
-        // Stap 1: Check of share bestaat en geldig is
-        const shareCheck = await pool.query(
-            'SELECT max_downloads, download_count, expires_at FROM shares WHERE id = $1',
-            [id]
-        );
-        
-        if (shareCheck.rows.length === 0) return res.status(404).send('Share not found');
-        const share = shareCheck.rows[0];
-        
-        if (share.expires_at && new Date() > new Date(share.expires_at)) {
-            return res.status(410).json({ error: 'Share has Expired' });
-        }
-
-        // Stap 2: Teller logica
-        if (!hasDownloaded) {
-            const updateRes = await pool.query(
-                `UPDATE shares 
-                 SET download_count = download_count + 1 
-                 WHERE id = $1 
-                 AND (max_downloads IS NULL OR download_count < max_downloads)
-                 RETURNING download_count`,
-                [id]
-            );
-
-            if (updateRes.rows.length === 0) {
-                return res.status(410).end();
-            }
-            res.cookie(cookieName, '1', { httpOnly: true, sameSite: 'lax' });
-        } else {
-            if (share.max_downloads && share.download_count >= share.max_downloads) {
-                // Optioneel: Blokkeer alsnog als limiet bereikt is
-            }
-        }
-        
-        // Stap 3: ZIP Genereren
-        const config = await getConfig();
-        const files = (await pool.query('SELECT * FROM files WHERE share_id = $1', [id])).rows;
-        if(files.length === 0) return res.status(404).send('Empty');
-
-        const totalSize = files.reduce((acc: number, f: any) => acc + parseInt(f.size), 0);
-        const useCompression = totalSize < 100 * 1024 * 1024;
-
-        const archive = archiver('zip', { 
-            zlib: { level: useCompression ? (config.zipLevel || 5) : 0 },
-            store: !useCompression
-        });
-
-        res.setHeader('Content-Type', 'application/zip');
-
-        res.attachment(`${id}.zip`);
-        archive.pipe(res);
-
-        const usedNames = new Set<string>();
-
-        files.forEach(f => {
-            const isMedia = config.zipNoMedia && (f.mime_type?.startsWith('image') || f.mime_type?.startsWith('video') || f.mime_type?.startsWith('audio'));
-            const shouldStore = !useCompression || isMedia;
-
-            let entryName = f.original_name;
-
-            if (usedNames.has(entryName)) {
-                let counter = 1;
-                const ext = path.extname(entryName);
-                const base = path.basename(entryName, ext);
-                while (usedNames.has(`${base} (${counter})${ext}`)) {
-                    counter++;
-                }
-                entryName = `${base} (${counter})${ext}`;
-            }
-            usedNames.add(entryName);
-
-            archive.file(f.storage_path, { name: entryName, store: shouldStore } as archiver.EntryData);
-        });
-        
-        // Audit log
-        await logAudit(null, 'download_zip', 'share', id, req, { size: totalSize });
-        
-        await archive.finalize();
-
-    } catch (e: any) {
-        release(); // Gebruik de veilige release functie
-        console.error('Download error:', e);
-        if (!res.headersSent) res.status(500).send('Download failed');
+    } else {
+        res.json({ valid: false });
     }
 });
 
 apiRouter.get('/shares/:id/files/:fileId', downloadLimiter, async (req, res) => {
     const { id, fileId } = req.params;
-    const cookieName = `dl_${id}`; // Zelfde cookie naam als bij de ZIP (per share, niet per file)
+    const cookieName = `dl_${id}`; 
+    const authCookieName = `share_auth_${id}`; // De beveiligingscookie
     const cookies = parseCookies(req);
     const hasDownloaded = cookies[cookieName];
 
-    // Stap 1: Metadata checken
+    // 0. Eerst share info ophalen om wachtwoord status te checken
+    const shareInfo = await pool.query('SELECT password_hash FROM shares WHERE id = $1', [id]);
+    if (shareInfo.rows.length === 0) return res.status(404).send('Share not found');
+    
+    // BEVEILIGINGS CHECK: Als er een wachtwoord op zit, check het cookie
+    if (shareInfo.rows[0].password_hash) {
+        const authCookie = cookies[authCookieName];
+        if (!authCookie) return res.status(403).send('Access Denied: Password required.');
+        
+        try {
+            const decoded: any = jwt.verify(authCookie, JWT_SECRET);
+            if (decoded.shareId !== id) throw new Error('Mismatch');
+        } catch (e) {
+            return res.status(403).send('Access Denied: Session expired.');
+        }
+    }
+
+    // Stap 1: Metadata checken (nu we weten dat toegang mag)
     const check = await pool.query(
         'SELECT s.max_downloads, s.download_count, s.expires_at, f.storage_path, f.original_name FROM files f JOIN shares s ON f.share_id = s.id WHERE s.id = $1 AND f.id = $2', 
         [id, fileId]
@@ -3249,10 +3131,32 @@ apiRouter.get('/public/reverse/:id', async (req, res) => {
 });
 
 apiRouter.post('/public/reverse/:id/verify', loginLimiter, async (req, res) => {
-    const result = await pool.query('SELECT password_hash FROM reverse_shares WHERE id = $1', [req.params.id]);
+    const { id } = req.params;
+    const result = await pool.query('SELECT password_hash FROM reverse_shares WHERE id = $1', [id]);
+    
     if (result.rows.length === 0) return res.status(404).json({ error: 'Not found' });
+    
     const valid = await bcrypt.compare(req.body.password, result.rows[0].password_hash);
-    res.json({ valid });
+    
+    if (valid) {
+        // --- BEVEILIGING START ---
+        const token = jwt.sign({ shareId: id, scope: 'upload' }, JWT_SECRET, { expiresIn: '1h' });
+        const config = await getConfig();
+        const isProduction = process.env.NODE_ENV === 'production';
+        const forceSecure = config.secureCookies || (config.appUrl && config.appUrl.startsWith('https://'));
+
+        res.cookie(`rev_auth_${id}`, token, { 
+            httpOnly: true, 
+            secure: isProduction ? forceSecure : false, 
+            sameSite: 'strict', 
+            maxAge: 3600000 
+        });
+        // --- BEVEILIGING EIND ---
+        
+        res.json({ valid: true });
+    } else {
+        res.json({ valid: false });
+    }
 });
 
 // REVERSE SHARE CHUNKED UPLOAD (GUEST)
@@ -3260,7 +3164,6 @@ apiRouter.post('/public/reverse/:id/verify', loginLimiter, async (req, res) => {
 // STAP 1: Init Guest Upload
 apiRouter.post('/public/reverse/:id/init', checkUploadLimits, uploadLimiter, async (req, res) => {
     const { id } = req.params;
-    // Check of share bestaat en geldig is
     const shareRes = await pool.query('SELECT * FROM reverse_shares WHERE id = $1', [id]);
     if (shareRes.rows.length === 0) return res.status(404).json({ error: 'Link not found' });
     
@@ -3269,28 +3172,36 @@ apiRouter.post('/public/reverse/:id/init', checkUploadLimits, uploadLimiter, asy
         return res.status(410).json({ error: 'Link has expired' });
     }
 
+    if (share.password_hash) {
+        const cookies = parseCookies(req);
+        const token = cookies[`rev_auth_${id}`];
+        if (!token) return res.status(403).json({ error: 'Password required' });
+
+        try {
+            const decoded: any = jwt.verify(token, JWT_SECRET);
+            if (decoded.shareId !== id) throw new Error();
+        } catch { return res.status(403).json({ error: 'Session invalid' }); }
+    }
+
     res.json({ success: true, reverseShareId: id });
 });
 
 // STAP 2: Chunk Guest Upload
-// We hergebruiken de 'chunkUpload' multer configuratie van hierboven (memoryStorage)
 apiRouter.post('/public/reverse/:id/chunk', checkUploadLimits, uploadLimiter, chunkUploadPublic.single('chunk'), async (req, res) => {
     const { id } = req.params;
     const { fileName, chunkIndex, fileId } = req.body;
 
-    // TypeScript check: garandeer dat file bestaat
     if (!req.file) return res.status(400).json({ error: 'No data' });
-    const uploadedFile = req.file; // Lokale referentie voor TS
 
-    // Path Traversal preventie
+    // UNIEKE NAAM: Opslaan als .part bestand om corruptie te voorkomen
     const safeFileName = path.basename(fileName);
-    const tempFilePath = path.join(TEMP_DIR, `rev_${id}_${fileId}_${safeFileName}`);
+    const partFilePath = path.join(TEMP_DIR, `rev_${id}_${fileId}_${safeFileName}.part_${chunkIndex}`);
 
     try {
-        // 1. Haal de share limiet EN het huidige gebruik op uit de database
-        // We tellen alle REEDS geüploade bestanden op (files tabel) die aan deze share hangen
+        // 2. Database checks (Quota & Validiteit & PASSWORD)
+        // Let op: 'r.password_hash' toegevoegd aan SELECT
         const shareCheck = await pool.query(
-            `SELECT r.max_size, COALESCE(SUM(f.size), 0) as current_used 
+            `SELECT r.max_size, r.password_hash, COALESCE(SUM(f.size), 0) as current_used 
              FROM reverse_shares r 
              LEFT JOIN files f ON r.id = f.reverse_share_id 
              WHERE r.id = $1 
@@ -3299,100 +3210,64 @@ apiRouter.post('/public/reverse/:id/chunk', checkUploadLimits, uploadLimiter, ch
         );
 
         if (shareCheck.rows.length === 0) {
-            // Ruim chunk op als share niet bestaat
             await fs.unlink(req.file.path).catch(() => {});
             return res.status(404).json({ error: 'Link not found' });
         }
 
-        const { max_size, current_used } = shareCheck.rows[0];
+        const share = shareCheck.rows[0];
+
+        if (share.password_hash) {
+            const cookies = parseCookies(req);
+            const token = cookies[`rev_auth_${id}`];
+            if (!token) {
+                await fs.unlink(req.file.path).catch(() => {});
+                return res.status(403).json({ error: 'Password required' });
+            }
+            try {
+                const decoded: any = jwt.verify(token, JWT_SECRET);
+                if (decoded.shareId !== id) throw new Error();
+            } catch { 
+                await fs.unlink(req.file.path).catch(() => {});
+                return res.status(403).json({ error: 'Session invalid' }); 
+            }
+        }
+
+        const { max_size, current_used } = share;
         const maxSize = parseInt(max_size);
         const currentDbUsage = parseInt(current_used);
-        
-        // Race condition preventie via in-memory tracking
-        const currentPending = pendingUploads.get(id) || 0;
 
-        // 2. Bepaal grootte van het bestand dat NU wordt opgebouwd in temp
-        let currentTempSize = 0;
-        try {
-            const stats = await fs.stat(tempFilePath);
-            currentTempSize = stats.size;
-        } catch(e) {
-            // Bestand bestaat nog niet (eerste chunk)
+        // Bij de EERSTE chunk checken we of het totale bestand nog past
+        if (parseInt(chunkIndex) === 0) {
+             if (maxSize > 0 && currentDbUsage >= maxSize) {
+                await fs.unlink(req.file.path).catch(() => {});
+                return res.status(413).json({ error: `Share limit exceeded.` });
+             }
         }
 
-        // 3. Totale controle: (DB) + (Pending in RAM) + (Temp Disk) + (Nieuwe Chunk)
-        const totalProjectedSize = currentDbUsage + currentPending + uploadedFile.size;
+        // 3. Verplaats de chunk naar zijn eigen .part bestand
+        await fs.rename(req.file.path, partFilePath);
 
-        if (maxSize > 0 && totalProjectedSize > maxSize) {
-            await fs.unlink(uploadedFile.path).catch(() => {}); 
-            await fs.unlink(tempFilePath).catch(() => {}); 
-            return res.status(413).json({ error: `Share limit exceeded. Maximum ${formatBytes(maxSize)}.` });
-        }
-
-        // 4. Controleer globale server limiet
-        const config = await getConfig();
-        const globalMaxBytes = getBytes(config.maxSizeVal || 10, config.maxSizeUnit || 'GB');
-        
-        if (currentTempSize + uploadedFile.size > globalMaxBytes) {
-            await fs.unlink(uploadedFile.path).catch(() => {});
-            return res.status(413).json({ error: `File too large for server policy.` });
-        }
-
-        // 5. Schrijf de chunk (Streams)
-        const { createReadStream, createWriteStream } = require('fs');
-        const flags = parseInt(chunkIndex) === 0 ? 'w' : 'a';
-
-        await new Promise((resolve, reject) => {
-            const source = createReadStream(uploadedFile.path);
-            const dest = createWriteStream(tempFilePath, { flags });
-            source.on('error', reject);
-            dest.on('error', reject);
-            dest.on('finish', resolve);
-            source.pipe(dest);
-        });
-
-        // Update pending bytes tracker (Race Condition Fix)
-        pendingUploads.set(id, (pendingUploads.get(id) || 0) + uploadedFile.size);
-        
-        // Cleanup na 1 uur (safety net)
-        setTimeout(() => {
-            const val = pendingUploads.get(id);
-            if (val !== undefined) {
-                const newVal = Math.max(0, val - uploadedFile.size);
-                // Als de teller op 0 staat, verwijder de entry uit het geheugen!
-                if (newVal === 0) pendingUploads.delete(id);
-                else pendingUploads.set(id, newVal);
-            }
-        }, 3600000);
-
-        await fs.unlink(uploadedFile.path).catch(() => {});
         res.json({ success: true });
     } catch (e: any) {
-        if (req.file) {
-            await fs.unlink(req.file.path).catch(() => {});
-            // Correctie pending bytes bij error
-            const val = pendingUploads.get(id);
-            if (val) pendingUploads.set(id, Math.max(0, val - uploadedFile.size));
-        }
+        if (req.file) await fs.unlink(req.file.path).catch(() => {});
         console.error('Guest Chunk error:', e);
         res.status(500).json({ error: 'Chunk write failed' });
     }
 });
 
 // STAP 3: Finalize Guest Upload
+// ROBUUSTE GAST UPLOAD - FINALIZE
 apiRouter.post('/public/reverse/:id/finalize', async (req, res) => {
     const { id } = req.params;
     const { files } = req.body;
     
-    // Bereken totaal direct aan het begin
-    const totalUploadSize = files.reduce((acc: number, f: any) => acc + f.size, 0);
-
     const client = await pool.connect();
 
     try {
         const config = await getConfig();
+        const totalUploadSize = files.reduce((acc: number, f: any) => acc + f.size, 0);
         
-        // Check quota ook tijdens finalize (voorkomt bypass bij server restart of API abuse)
+        // 1. Check share en limieten
         const shareRes = await client.query(`
             SELECT r.*, COALESCE(SUM(f.size), 0) as current_used 
             FROM reverse_shares r 
@@ -3403,53 +3278,87 @@ apiRouter.post('/public/reverse/:id/finalize', async (req, res) => {
         if (shareRes.rows.length === 0) throw new Error('Invalid share');
         const share = shareRes.rows[0];
 
+        if (share.password_hash) {
+            const cookies = parseCookies(req);
+            const token = cookies[`rev_auth_${id}`];
+            if (!token) throw new Error('Password required'); // Gooit error die door catch wordt gevangen
+
+            try {
+                const decoded: any = jwt.verify(token, JWT_SECRET);
+                if (decoded.shareId !== id) throw new Error();
+            } catch { throw new Error('Session invalid'); }
+        }
+
         if (share.max_size > 0 && (parseInt(share.current_used) + totalUploadSize > parseInt(share.max_size))) {
             throw new Error(`Upload exceeds the limit of ${formatBytes(share.max_size)}.`);
         }
 
         await client.query('BEGIN');
 
-        for (const f of files) {
-            const tempPath = path.join(TEMP_DIR, `rev_${id}_${f.fileId}_${f.fileName}`);
+        // 2. Helper functie om delen samen te voegen
+        const mergeParts = async (fileName: string, fileId: string, totalChunks: number, finalPath: string) => {
+            const { createReadStream, createWriteStream } = require('fs');
+            const dest = createWriteStream(finalPath);
             
-            // We genereren een unieke bestandsnaam in de guest_uploads map
+            for (let i = 0; i < totalChunks; i++) {
+                const partPath = path.join(TEMP_DIR, `rev_${id}_${fileId}_${fileName}.part_${i}`);
+                try {
+                    await fs.access(partPath);
+                } catch {
+                    dest.end();
+                    throw new Error(`Part ${i} of ${fileName} is missing. Upload incomplete.`);
+                }
+                await new Promise((resolve, reject) => {
+                    const source = createReadStream(partPath);
+                    source.on('error', reject);
+                    source.pipe(dest, { end: false });
+                    source.on('end', resolve);
+                });
+                await fs.unlink(partPath).catch(() => {}); // Opruimen
+            }
+            dest.end();
+            await new Promise(resolve => dest.on('finish', resolve));
+        };
+
+        // 3. Verwerken van bestanden
+        for (const f of files) {
+            // Bereken chunks
+            const k = 1024;
+            const sizeMap: any = { 'KB': k, 'MB': k*k, 'GB': k*k*k, 'TB': k*k*k*k };
+            const chunkSizeVal = config.chunkSizeVal || 50;
+            const chunkSizeUnit = config.chunkSizeUnit || 'MB';
+            const CHUNK_SIZE = chunkSizeVal * (sizeMap[chunkSizeUnit] || sizeMap['MB']);
+            const totalChunks = Math.ceil(f.size / CHUNK_SIZE);
+
+            // Bepaal paden
+            const safeOriginalName = sanitizeFilename(f.originalName);
             const uniqueName = crypto.randomBytes(8).toString('hex') + path.extname(f.fileName);
             const GUEST_DIR = path.join(UPLOAD_DIR, 'guest_uploads');
             await fs.mkdir(GUEST_DIR, { recursive: true }); 
-
             const finalPath = path.join(GUEST_DIR, uniqueName);
 
-            try {
-                await fs.access(tempPath);
-            } catch {
-                throw new Error(`The file ${f.fileName} is incomplete.`);
-            }
+            // Voeg samen
+            await mergeParts(f.fileName, f.fileId, totalChunks, finalPath);
 
-            // Virusscan
+            // Virusscan & Extensie check
             if (clamscanInstance) {
-                const result = await clamscanInstance.isInfected(tempPath);
+                const result = await clamscanInstance.isInfected(finalPath);
                 if (result.isInfected) {
-                    await fs.unlink(tempPath).catch(() => {});
+                    await fs.unlink(finalPath).catch(() => {});
                     throw new Error(`Virus in ${f.originalName}!`);
                 }
             } else if (config.clamavMustScan) {
-                await fs.unlink(tempPath).catch(() => {});
-                console.error("⛔ Guest upload blocked: ClamAV is offline.");
+                await fs.unlink(finalPath).catch(() => {});
                 throw new Error("Security error: Virus scanner is unavailable.");
             }
 
-            await fs.rename(tempPath, finalPath);
-
-            const safeOriginalName = sanitizeFilename(f.originalName);
-            
-            // SECURITY Controleer extensie opnieuw bij finalizeren
-            const dangerousTypes = ['.exe', '.bat', '.cmd', '.sh', '.ps1', '.vbs', '.php', '.php3', '.php4', '.phtml', '.pl', '.py', '.cgi', '.jsp', '.asp', '.aspx', '.jar', '.msi', '.com', '.scr', '.hta', '.app', '.dmg', '.pkg'];
+            const dangerousTypes = ['.exe', '.bat', '.cmd', '.sh', '.php', '.pl', '.py', '.cgi', '.jar', '.msi', '.com', '.scr', '.hta'];
             if (dangerousTypes.includes(path.extname(safeOriginalName).toLowerCase())) {
-                 // Bestand verwijderen en error gooien
                  await fs.unlink(finalPath).catch(() => {});
-                 throw new Error(`Security violation: File type ${path.extname(safeOriginalName)} is not allowed.`);
+                 throw new Error(`Security violation: File type not allowed.`);
             }
 
+            // Database insert
             await client.query(
                 `INSERT INTO files (reverse_share_id, filename, original_name, size, mime_type, storage_path) VALUES ($1, $2, $3, $4, $5, $6)`, 
                 [id, uniqueName, safeOriginalName, f.size, f.mimeType, finalPath]
@@ -3464,28 +3373,21 @@ apiRouter.post('/public/reverse/:id/finalize', async (req, res) => {
                 const creator = await pool.query('SELECT email FROM users WHERE id = $1', [share.user_id]);
                 if (creator.rows.length > 0) {
                     const baseUrl = getBaseUrl(config, req);
-                    await sendEmail(
-                        creator.rows[0].email, 
-                        `New Upload in "${share.name}"`, 
+                    await sendEmail(creator.rows[0].email, `New Upload in "${share.name}"`, 
                         `<p>There are ${files.length} new files uploaded via your public link.</p>`, 
-                        `${baseUrl}/reverse`, 
-                        'View Dashboard'
-                    );
+                        `${baseUrl}/reverse`, 'View Dashboard');
                 }
-            } catch (mailErr) {
-                 console.error("⚠️ Notificatie mail failed:", mailErr);
-            }
+            } catch (mailErr) {}
         }
 
         res.json({ success: true });
 
     } catch (e: any) {
         await client.query('ROLLBACK');
+        console.error("Finalize error:", e);
         const status = e.message.includes('Virus') ? 400 : 500;
         res.status(status).json({ error: e.message || 'Fail' });
     } finally {
-        // Pending bytes opschonen
-        pendingUploads.delete(id);
         client.release();
     }
 });
@@ -3495,7 +3397,7 @@ async function runCLI() {
     const args = process.argv.slice(2);
     if (args.length === 0) return;
     const command = args[0]; const params = args.slice(1);
-    console.log('--- Nexo share CLI v2.0 ---');
+    console.log('--- Nexo Share CLI v2.0 ---');
     
     try {
         if(command==='help'){ 
@@ -3775,8 +3677,8 @@ async function initDB() {
                 if (adminCheck.rows && adminCheck.rows.length > 0) {
                     if (parseInt(adminCheck.rows[0].count) === 0) {
                         const hash = await bcrypt.hash('admin123', 10);
-                        await client.query(`INSERT INTO users (email, password_hash, name, is_admin) VALUES ($1, $2, $3, $4)`, ['admin@Nexo share.com', hash, 'Super Admin', true]);
-                        console.log('✅ DB Initialized & Healed. Login: admin@Nexo share.com / admin123');
+                        await client.query(`INSERT INTO users (email, password_hash, name, is_admin) VALUES ($1, $2, $3, $4)`, ['admin@nexoshare.com', hash, 'Super Admin', true]);
+                        console.log('✅ DB Initialized & Healed. Login: admin@nexoshare.com / admin123');
                     } else {
                         console.log('✅ DB Ready & Up-to-date');
                     }

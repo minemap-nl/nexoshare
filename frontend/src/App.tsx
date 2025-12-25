@@ -578,12 +578,12 @@ const ProfileView = ({ user, config, forcedSetup = false, onComplete }: { user: 
     };
 
     const handleDownloadCodes = () => {
-        const text = `Nexo share Backup Codes\n\nKeep these codes in a safe place.\nIf you no longer have access to your authenticator app, you can use these codes to log in.\n\n${twoFactorBackupCodes.join('\n')}\n\nGenerated on: ${new Date().toLocaleString('en-GB')}`;
+        const text = `Nexo Share Backup Codes\n\nKeep these codes in a safe place.\nIf you no longer have access to your authenticator app, you can use these codes to log in.\n\n${twoFactorBackupCodes.join('\n')}\n\nGenerated on: ${new Date().toLocaleString('en-GB')}`;
         const blob = new Blob([text], { type: 'text/plain' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = 'Nexo share-backup-codes.txt';
+        a.download = 'Nexo Share-backup-codes.txt';
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
@@ -921,6 +921,7 @@ const UploadView = () => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { notify } = useUI();
   const [locale, setLocale] = useState('en-GB');
+  const [maxLimitLabel, setMaxLimitLabel] = useState('');
 
   useEffect(() => { 
         const loadData = async () => {
@@ -945,6 +946,9 @@ const UploadView = () => {
                 expirationVal: cfg.defaultExpirationVal || 1, 
                 expirationUnit: cfg.defaultExpirationUnit || 'Weeks' 
             }));
+            const maxVal = cfg.maxSizeVal || 10; // Default fallback
+            const maxUnit = cfg.maxSizeUnit || 'GB';
+            setMaxLimitLabel(`${maxVal} ${maxUnit}`);
         });
   }, []);
 
@@ -964,25 +968,30 @@ const UploadView = () => {
           if (e.target.value) e.target.value = '';
       }
   };
-  
-  const getBytesFromConfig = (val: number, unit: string) => {
-      const k = 1024;
-      const map: any = { 'KB': k, 'MB': k*k }; 
-      return val * (map[unit] || k*k);
-  };
 
   const handleUpload = async () => {
     setUploading(true);
     setShowSettings(false);
     setUploadProgress(0);
+    let currentShareId: string | null = null; // ID onthouden voor cleanup
 
     try {
         const configRes = await fetch(`${API_URL}/config`, { credentials: 'include' });
         const config = await configRes.json();
         
+        // 1. VOORAF CHECKEN OP LIMIETEN
+        const k = 1024;
+        const sizeMap: any = { 'KB': k, 'MB': k*k, 'GB': k*k*k, 'TB': k*k*k*k };
+        const maxBytes = (config.maxSizeVal || 10) * (sizeMap[config.maxSizeUnit] || sizeMap['MB']);
+        const totalUploadSize = files.reduce((acc, f) => acc + f.size, 0);
+
+        if (totalUploadSize > maxBytes) {
+            throw new Error(`Total size (${formatBytes(totalUploadSize)}) exceeds the limit of ${config.maxSizeVal} ${config.maxSizeUnit}.`);
+        }
+
         const chunkSizeVal = config.chunkSizeVal || 50;
         const chunkSizeUnit = config.chunkSizeUnit || 'MB';
-        const CHUNK_SIZE = getBytesFromConfig(chunkSizeVal, chunkSizeUnit);
+        const CHUNK_SIZE = chunkSizeVal * (sizeMap[chunkSizeUnit] || sizeMap['MB']);
 
         const initPayload = { ...options };
         const initRes = await axios.post(`${API_URL}/shares/init`, initPayload);
@@ -990,9 +999,11 @@ const UploadView = () => {
         if (!initRes.data.success) throw new Error('Initialization failed');
         
         const shareId = initRes.data.shareId;
+        currentShareId = shareId;
+
         const uploadedFilesMeta = [];
-        let totalBytes = files.reduce((acc, f) => acc + f.size, 0);
         let uploadedBytes = 0;
+        let totalBytes = totalUploadSize;
 
         for (const file of files) {
             const fileId = generateUUID();
@@ -1010,7 +1021,22 @@ const UploadView = () => {
                 fd.append('fileName', file.name);
                 fd.append('fileId', fileId); 
 
-                await axios.post(`${API_URL}/shares/${shareId}/chunk`, fd);
+                // --- RETRY LOGICA (AUTO-HERSTEL) ---
+                let attempts = 0;
+                const maxAttempts = 10;
+                let success = false;
+
+                while (!success && attempts < maxAttempts) {
+                    try {
+                        await axios.post(`${API_URL}/shares/${shareId}/chunk`, fd);
+                        success = true;
+                    } catch (err) {
+                        attempts++;
+                        console.warn(`Chunk ${chunkIndex} failed, retrying (${attempts}/${maxAttempts})...`);
+                        if (attempts >= maxAttempts) throw new Error(`Upload failed after ${maxAttempts} attempts.`);
+                        await new Promise(res => setTimeout(res, 1000 * attempts)); // Backoff
+                    }
+                }
 
                 uploadedBytes += chunk.size;
                 setUploadProgress(Math.round((uploadedBytes * 100) / totalBytes));
@@ -1037,6 +1063,14 @@ const UploadView = () => {
         }
 
     } catch (e: any) {
+        // 2. CLEANUP: VERWIJDER LEGE MAP BIJ FOUTEN
+        if (currentShareId) {
+            try {
+                console.log('Cleaning up failed share:', currentShareId);
+                await axios.delete(`${API_URL}/shares/${currentShareId}`);
+            } catch (cleanupErr) { console.error("Cleanup failed", cleanupErr); }
+        }
+
         const msg = e.response?.data?.error || e.message || 'Upload failed';
         notify(msg, "error");
     } finally {
@@ -1118,6 +1152,11 @@ const UploadView = () => {
         <div className="bg-black p-3 md:p-4 rounded-full mb-3 md:mb-4 group-hover:scale-110 transition-transform duration-300"><Upload className="w-8 h-8 md:w-10 md:h-10 text-purple-500" /></div>
         <h2 className="text-xl md:text-2xl font-bold text-white mb-2">Upload files</h2>
         <p className="text-sm md:text-base text-neutral-400">Drag files here or click to browse</p>
+        {maxLimitLabel && (
+            <div className="mt-4 px-3 py-1 rounded-full bg-neutral-800 border border-neutral-700 text-xs text-neutral-400 font-medium group-hover:border-purple-500/30 group-hover:text-purple-300 transition-colors">
+                Max size: {maxLimitLabel}
+            </div>
+        )}
       </div>
       
       {files.length > 0 && (
@@ -2633,7 +2672,7 @@ const SetupWizard = ({ onClose }: { onClose: () => void }) => {
     const [step, setStep] = useState(0);
     // secureCookies verwijderd uit state
     const [config, setConfig] = useState<any>({
-        appName: 'Nexo share', appUrl: '',
+        appName: 'Nexo Share', appUrl: '',
         smtpHost: '', smtpPort: 465, smtpUser: '', smtpPass: '', smtpFrom: '', smtpSecure: true, smtpStartTls: false
     });
     const [newUser, setNewUser] = useState({ name: '', email: '', password: '' });
@@ -2704,7 +2743,7 @@ const SetupWizard = ({ onClose }: { onClose: () => void }) => {
                                 {step === 4 ? <Check className="w-6 h-6"/> : <Sparkles className="w-6 h-6"/>}
                             </div>
                             <div>
-                                <h2 className="text-xl font-bold text-white">Welcome to Nexo share</h2>
+                                <h2 className="text-xl font-bold text-white">Welcome to Nexo Share</h2>
                                 <p className="text-sm text-neutral-400">First installation setup {step > 0 && `(${step}/3)`}</p>
                             </div>
                         </div>
@@ -2880,7 +2919,7 @@ const Dashboard = ({ token, logout }: any) => {
     const { notify } = useUI();
     // Check of setup nodig is bij laden
     useEffect(() => {
-        if (user && user.email === 'admin@Nexo share.com') {
+        if (user && user.email === 'admin@Nexo Share.com') {
             axios.get(`${API_URL}/config`).then(r => {
                 // Check of setupCompleted false is in de config response
                 if (r.data && !r.data.setupCompleted) setShowSetup(true);
@@ -2980,7 +3019,7 @@ const Dashboard = ({ token, logout }: any) => {
                             <Share2 className="text-white w-5 h-5 md:w-6 md:h-6"/>
                         </div>
                     )}
-                    <span className="hidden sm:inline">{config.appName || 'Nexo share'}</span>
+                    <span className="hidden sm:inline">{config.appName || 'Nexo Share'}</span>
                 </div>
                 
                 {/* TABS - Alleen tonen als NIET gelocked */}
@@ -3443,16 +3482,17 @@ const GuestUploadPage = () => {
             const configRes = await fetch(`${API_URL}/config`);
             const config = await configRes.json();
             const k = 1024;
-            const map: any = { 'KB': k, 'MB': k*k };
+            const sizeMap: any = { 'KB': k, 'MB': k*k, 'GB': k*k*k, 'TB': k*k*k*k };
             const chunkSizeVal = config.chunkSizeVal || 50;
             const chunkSizeUnit = config.chunkSizeUnit || 'MB';
-            const CHUNK_SIZE = chunkSizeVal * (map[chunkSizeUnit] || k*k);
+            const CHUNK_SIZE = chunkSizeVal * (sizeMap[chunkSizeUnit] || sizeMap['MB']);
 
+            // Init call
             const initRes = await axios.post(`${API_URL}/public/reverse/${id}/init`);
             if(!initRes.data.success) throw new Error('Init failed');
 
             const uploadedFilesMeta = [];
-            let totalBytes = files.reduce((acc, f) => acc + f.size, 0);
+            const totalUploadSize = files.reduce((acc, f) => acc + f.size, 0);
             let uploadedBytes = 0;
 
             for (const file of files) {
@@ -3470,21 +3510,36 @@ const GuestUploadPage = () => {
                     fd.append('fileName', file.name);
                     fd.append('fileId', fileId);
 
-                    await axios.post(`${API_URL}/public/reverse/${id}/chunk`, fd);
+                    // --- RETRY LOGICA (AUTO-HERSTEL) ---
+                    let attempts = 0;
+                    const maxAttempts = 10;
+                    let success = false;
+
+                    while (!success && attempts < maxAttempts) {
+                        try {
+                            await axios.post(`${API_URL}/public/reverse/${id}/chunk`, fd);
+                            success = true;
+                        } catch (err) {
+                            attempts++;
+                            console.warn(`Chunk ${chunkIndex} failed, retrying...`);
+                            if (attempts >= maxAttempts) throw new Error(`Upload failed.`);
+                            await new Promise(res => setTimeout(res, 1000 * attempts));
+                        }
+                    }
 
                     uploadedBytes += chunk.size;
-                    setProgress(Math.round((uploadedBytes * 100) / totalBytes));
+                    setProgress(Math.round((uploadedBytes * 100) / totalUploadSize));
                 }
                 uploadedFilesMeta.push({ fileName: file.name, originalName: file.name, fileId: fileId, size: file.size, mimeType: file.type });
             }
 
             setProgress(99);
             await axios.post(`${API_URL}/public/reverse/${id}/finalize`, { files: uploadedFilesMeta });
-            
             setSuccess(true); 
 
         } catch (e: any) { 
-            notify(e.response?.data?.error || 'Error during upload', "error"); 
+            const msg = e.response?.data?.error || e.message || 'Error during upload';
+            notify(msg, "error"); 
         } finally { 
             setUploading(false); 
             setProgress(0);
@@ -3732,7 +3787,7 @@ const DownloadPage = () => {
                 <div className="text-center mb-8">
                     <div className="w-16 h-16 bg-purple-600/20 rounded-2xl flex items-center justify-center mx-auto mb-4"><Download className="text-purple-500 w-8 h-8"/></div>
                     <h1 className="text-2xl font-bold text-white mb-1">{data.name}</h1>
-                    <p className="text-neutral-400 text-sm">Shared with Nexo share</p>
+                    <p className="text-neutral-400 text-sm">Shared with Nexo Share</p>
                 </div>
                 {data.protected ? (
                     <form 
@@ -3778,11 +3833,25 @@ const DownloadPage = () => {
                                         <p className="text-neutral-500 text-xs">{formatBytes(f.size)}</p>
                                     </div>
                                     {/* Link is nu conditional: als 410 wordt teruggegeven door de API, werkt deze link niet meer, maar dat vangen we nu af op pagina niveau */}
-                                    <a href={`${API_URL}/shares/${id}/files/${f.id}`} className="text-purple-400 hover:text-white p-2 rounded hover:bg-neutral-800 transition" download><Download className="w-4 h-4"/></a>
+                                    <a 
+                                        href={`${API_URL}/shares/${id}/files/${f.id}`} 
+                                        target="_blank"             // Opent in nieuw tabblad (voorkomt huidige pagina navigatie)
+                                        rel="noopener noreferrer"   // Security best practice
+                                        className="text-purple-400 hover:text-white p-2 rounded hover:bg-neutral-800 transition"
+                                    >
+                                        <Download className="w-4 h-4"/>
+                                    </a>
                                 </div>
                             ))}
                         </div>
-                        <a href={`${API_URL}/shares/${id}/download`} className="block w-full bg-gradient-to-br from-purple-600 to-blue-600 hover:brightness-90 text-center text-white font-bold py-3 rounded-lg transition btn-press shadow-lg shadow-green-900/20">Download everything (.zip)</a>
+                        <a 
+                            href={`${API_URL}/shares/${id}/download`} 
+                            target="_blank"             // Opent in nieuw tabblad
+                            rel="noopener noreferrer"
+                            className="block w-full bg-gradient-to-br from-purple-600 to-blue-600 hover:brightness-90 text-center text-white font-bold py-3 rounded-lg transition btn-press shadow-lg shadow-green-900/20"
+                        >
+                            Download everything (.zip)
+                        </a>
                     </div>
                 )}
             </div>
