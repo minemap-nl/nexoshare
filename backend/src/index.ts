@@ -16,10 +16,10 @@ import cron from 'node-cron';
 import NodeClam from 'clamscan';
 import speakeasy from 'speakeasy';
 import QRCode from 'qrcode';
-import { 
-    generateRegistrationOptions, 
-    verifyRegistrationResponse, 
-    generateAuthenticationOptions, 
+import {
+    generateRegistrationOptions,
+    verifyRegistrationResponse,
+    generateAuthenticationOptions,
     verifyAuthenticationResponse
 } from '@simplewebauthn/server';
 import validator from 'validator';
@@ -66,8 +66,8 @@ const getBaseUrl = (config: any, req?: Request): string => {
     // 2. Fallback: Gebruik de Host header (veiliger dan Origin, mits achter een goede proxy).
     // We gebruiken req.protocol en req.get('host') wat standaard Express gedrag is.
     if (req) {
-        const protocol = req.protocol; 
-        const host = req.get('host'); 
+        const protocol = req.protocol;
+        const host = req.get('host');
         return `${protocol}://${host}`;
     }
 
@@ -87,8 +87,8 @@ const TEMP_DIR = path.join(UPLOAD_DIR, 'temp');
 const SYSTEM_DIR = path.join(UPLOAD_DIR, 'system'); // Veilige map voor systeem assets
 
 // Zorg dat mappen bestaan
-fs.mkdir(TEMP_DIR, { recursive: true }).catch(() => {});
-fs.mkdir(SYSTEM_DIR, { recursive: true }).catch(() => {});
+fs.mkdir(TEMP_DIR, { recursive: true }).catch(() => { });
+fs.mkdir(SYSTEM_DIR, { recursive: true }).catch(() => { });
 const JWT_SECRET = process.env.JWT_SECRET;
 if (!JWT_SECRET || JWT_SECRET === 'dev-secret-change-me') {
     console.error('❌ CRITICAL: JWT_SECRET must be set in environment variables!');
@@ -96,22 +96,22 @@ if (!JWT_SECRET || JWT_SECRET === 'dev-secret-change-me') {
     process.exit(1);
 }
 
-fs.mkdir(TEMP_DIR, { recursive: true }).catch(() => {});
+fs.mkdir(TEMP_DIR, { recursive: true }).catch(() => { });
 
 const pool = new Pool({
-  host: process.env.DB_HOST || 'localhost',
-  port: parseInt(process.env.DB_PORT || '5432'),
-  database: process.env.DB_NAME || 'Nexo Share',
-  user: process.env.DB_USER || 'postgres',
-  password: process.env.DB_PASSWORD,
-  max: 20,
-  idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 2000,
-  query_timeout: 10000, // 10 Seconds max per query
-  statement_timeout: 10000,
-  ssl: process.env.DB_SSL === 'true' ? {
-    rejectUnauthorized: false
-  } : false
+    host: process.env.DB_HOST || 'localhost',
+    port: parseInt(process.env.DB_PORT || '5432'),
+    database: process.env.DB_NAME || 'Nexo Share',
+    user: process.env.DB_USER || 'postgres',
+    password: process.env.DB_PASSWORD,
+    max: 20,
+    idleTimeoutMillis: 30000,
+    connectionTimeoutMillis: 2000,
+    query_timeout: 10000, // 10 Seconds max per query
+    statement_timeout: 10000,
+    ssl: process.env.DB_SSL === 'true' ? {
+        rejectUnauthorized: false
+    } : false
 });
 
 // Error handling voor database pool
@@ -121,10 +121,21 @@ pool.on('error', (err) => {
 
 const CLAMAV_HOST = process.env.CLAMAV_HOST || 'clamav';
 const CLAMAV_PORT = parseInt(process.env.CLAMAV_PORT || '3310');
+
+// --- CENTRAL DOMAIN CONFIGURATION ---
+// "Keep it simple and logical" - 1 variabele (APP_URL) stuurt de defaults aan.
+const APP_URL = process.env.APP_URL || 'http://localhost:3000';
+// Haal de hostname (domein) uit de URL (bijv. 'share.mijnwebsite.nl')
+let APP_DOMAIN = 'localhost';
+try { APP_DOMAIN = new URL(APP_URL).hostname; } catch (e) { console.warn('Invalid APP_URL, fallback to localhost'); }
+
 // WebAuthn Configuration
 const RP_NAME = 'Nexo Share';
-const RP_ID = process.env.RP_ID || 'localhost';
-const ORIGIN = process.env.ORIGIN || 'http://localhost:5173';
+// RP_ID is het domein waarop passkeys geldig zijn (geen poort/protocol)
+const RP_ID = process.env.RP_ID || APP_DOMAIN;
+// ORIGIN is de volledige URL waarvandaan het verzoek komt (voor verificatie)
+// Fallback naar web-port 3000 voor dev, maar in prod is dit vaak gelijk aan APP_URL
+const ORIGIN = process.env.ORIGIN || 'http://localhost:3000';
 
 let clamscanInstance: any = null;
 
@@ -191,20 +202,20 @@ cron.schedule('0 * * * *', async () => {
     try {
         // 1. Zoek verlopen shares
         const res = await client.query(`SELECT id FROM shares WHERE expires_at IS NOT NULL AND expires_at < NOW()`);
-        
+
         for (const row of res.rows) {
             const sharePath = path.join(UPLOAD_DIR, row.id);
             // Verwijder fysieke map
-            await fs.rm(sharePath, { recursive: true, force: true }).catch(() => {});
+            await fs.rm(sharePath, { recursive: true, force: true }).catch(() => { });
             console.log(`Expired share deleted from disk: ${row.id}`);
         }
 
         // 2. Verwijder uit database (Cascade verwijdert ook de file-records)
         await client.query(`DELETE FROM shares WHERE expires_at IS NOT NULL AND expires_at < NOW()`);
-        
+
         // 3. Zelfde voor reverse shares (hoewel die vaak geen map hebben, maar wel records)
         await client.query(`DELETE FROM reverse_shares WHERE expires_at IS NOT NULL AND expires_at < NOW()`);
-        
+
         // 4. Cleanup sso tokens
         await pool.query('DELETE FROM sso_tokens WHERE expires_at < NOW()');
 
@@ -226,12 +237,12 @@ const cleanupOrphanedFolders = async () => {
         const dirents = await fs.readdir(UPLOAD_DIR, { withFileTypes: true });
         const folders = dirents
             // VOEG HIER JE MAP TOE AAN DE UITZONDERINGEN:
-            .filter(dirent => 
-                dirent.isDirectory() && 
-                dirent.name !== 'temp' && 
+            .filter(dirent =>
+                dirent.isDirectory() &&
+                dirent.name !== 'temp' &&
                 dirent.name !== 'guest_uploads' &&
                 dirent.name !== 'system'
-            ) 
+            )
             .map(dirent => dirent.name);
 
         if (folders.length === 0) return;
@@ -261,14 +272,14 @@ const cleanupOrphanedGuestFiles = async () => {
     try {
         // Check of map bestaat
         await fs.access(guestDir);
-        
+
         const filesOnDisk = await fs.readdir(guestDir);
         if (filesOnDisk.length === 0) return;
 
         // Haal alle bekende paden op uit de DB die in guest_uploads staan
         // We zoeken op storage_path die 'guest_uploads' bevatten
         const dbResult = await pool.query("SELECT storage_path FROM files WHERE storage_path LIKE '%guest_uploads%'");
-        
+
         // Maak een Set van bestandsnamen (alleen de bestandsnaam, niet het hele pad)
         const knownFiles = new Set(dbResult.rows.map(row => path.basename(row.storage_path)));
 
@@ -281,7 +292,7 @@ const cleanupOrphanedGuestFiles = async () => {
                     const stats = await fs.stat(filePath);
                     // Check leeftijd (1 uur) om race conditions te voorkomen
                     if (Date.now() - stats.mtimeMs > 3600000) {
-                        await fs.unlink(filePath).catch(() => {});
+                        await fs.unlink(filePath).catch(() => { });
                         cleaned++;
                     }
                 } catch (e) { }
@@ -317,10 +328,10 @@ const cleanupOrphanedShareFiles = async () => {
                         const stats = await fs.stat(filePath);
                         // Alleen verwijderen als ouder dan 1 uur (zodat we geen actieve uploads killen)
                         if (Date.now() - stats.mtimeMs > 3600000) {
-                            await fs.unlink(filePath).catch(() => {});
+                            await fs.unlink(filePath).catch(() => { });
                             console.log(`🗑️ Wees-bestand verwijderd uit share ${shareId}: ${file}`);
                         }
-                    } catch (e) {}
+                    } catch (e) { }
                 }
             }
         }
@@ -343,17 +354,17 @@ cron.schedule('*/15 * * * *', async () => {
     try {
         const files = await fs.readdir(TEMP_DIR);
         const now = Date.now();
-        
+
         // Agressievere cleanup: bestanden ouder dan 30 Minutes verwijderen
         // Zolang een upload bezig is, update de 'mtime' en wordt hij niet verwijderd.
         const maxAge = 30 * 60 * 1000;
-        
+
         let deletedCount = 0;
         for (const file of files) {
             try {
                 const filePath = path.join(TEMP_DIR, file);
                 const stats = await fs.stat(filePath);
-                
+
                 // Als bestand ouder is dan 1 uur
                 if (now - stats.mtimeMs > maxAge) {
                     await fs.unlink(filePath);
@@ -373,13 +384,14 @@ cron.schedule('*/15 * * * *', async () => {
 app.set('trust proxy', 1);
 
 // CORS Configuration
-const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || 'http://localhost:5173').split(',').map(o => o.trim());
+// We staan standaard de APP_URL toe, plus localhost voor dev.
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || 'http://localhost:3000').split(',').map(o => o.trim());
 
 app.use(cors({
     origin: (origin, callback) => {
         // Allow requests with no origin (mobile apps, Postman, etc.)
         if (!origin) return callback(null, true);
-        
+
         if (ALLOWED_ORIGINS.includes(origin)) {
             callback(null, true);
         } else {
@@ -403,8 +415,8 @@ app.use((req, res, next) => {
 
     // 2. Anti-Clickjacking
     // Voorkomt dat jouw site in een iframe op een andere site wordt geladen.
-    res.setHeader('X-Frame-Options', 'DENY'); 
-    
+    res.setHeader('X-Frame-Options', 'DENY');
+
     // 3. MIME-type sniffing preventie
     // Zorgt dat browsers bestanden niet als een ander type interpreteren (bijv. plaatje als script).
     res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -417,36 +429,36 @@ app.use((req, res, next) => {
     // Dit is het beleid dat bepaalt wat mag laden.
     const cspDirectives = [
         "default-src 'self'", // Standaard: alleen dingen van eigen domein laden
-        
+
         // SCRIPTS: Sta eigen scripts toe. 'unsafe-inline' is vaak nodig voor React/Vite in sommige setups.
         // Als je heel strikt wilt zijn, haal je 'unsafe-inline' weg, maar test dan goed!
-        "script-src 'self' 'unsafe-inline'", 
-        
+        "script-src 'self' 'unsafe-inline'",
+
         // STYLES: 'unsafe-inline' is nodig voor veel CSS-in-JS libraries en inline styles in React.
         "style-src 'self' 'unsafe-inline'",
-        
+
         // AFBEELDINGEN: 
         // We staan 'data:' toe (base64) en 'blob:' (previews).
         // We staan 'https:' toe zodat externe logo URL's (van klanten/config) ALTIJD werken.
-        "img-src 'self' data: blob: https:", 
-        
+        "img-src 'self' data: blob: https:",
+
         // CONNECT (API & Fetch):
         // 'self' zorgt dat de frontend altijd met de eigen backend mag praten.
         // SSO redirects gebeHours via navigatie, dus die vallen hier niet onder (dat breekt niet).
-        "connect-src 'self'", 
-        
+        "connect-src 'self'",
+
         // FONTS:
         "font-src 'self' data:",
-        
+
         // OBJECTS: Blokkeer flash/java plugins volledig
         "object-src 'none'",
-        
+
         // BASE: Voorkomt <base> tag hijacking
         "base-uri 'self'",
-        
+
         // FORMS: Zorgt dat formulieren alleen naar eigen domein of veilige doelen mogen posten.
         // SSO Logins via POST kunnen hier 'https:' nodig hebben, maar meestal is SSO een redirect (GET).
-        "form-action 'self' https:" 
+        "form-action 'self' https:"
     ];
 
     res.setHeader('Content-Security-Policy', cspDirectives.join('; '));
@@ -458,12 +470,12 @@ app.use(express.json());
 // --- Security: Simple In-Memory Rate Limiter ---
 const createRateLimiter = (windowMs: number, max: number, message: string) => {
     const requests = new Map<string, number[]>();
-    
+
     // Cleanup met beter interval management
     const cleanupInterval = setInterval(() => {
         const now = Date.now();
         const cutoff = now - windowMs;
-        
+
         for (const [ip, timestamps] of requests.entries()) {
             const valid = timestamps.filter(t => t > cutoff);
             if (valid.length === 0) {
@@ -473,7 +485,7 @@ const createRateLimiter = (windowMs: number, max: number, message: string) => {
             }
         }
     }, Math.min(windowMs, 60000)); // Max 1 minuut interval voor efficiency
-    
+
     // Cleanup bij process shutdown
     process.on('SIGTERM', () => clearInterval(cleanupInterval));
     process.on('SIGINT', () => clearInterval(cleanupInterval)); // Cleanup interval gelijk aan window
@@ -481,14 +493,14 @@ const createRateLimiter = (windowMs: number, max: number, message: string) => {
     return (req: Request, res: Response, next: NextFunction) => {
         const ip = getClientIP(req);
         const now = Date.now();
-        
+
         let timestamps = requests.get(ip) || [];
         timestamps = timestamps.filter(t => t > now - windowMs);
-        
+
         if (timestamps.length >= max) {
             return res.status(429).json({ error: message });
         }
-        
+
         timestamps.push(now);
         requests.set(ip, timestamps);
         next();
@@ -508,7 +520,7 @@ const downloadLimiter = createRateLimiter(60 * 60 * 1000, 100, "Too many downloa
 class AsyncQueue {
     private running = 0;
     private queue: Array<(value: unknown) => void> = [];
-    constructor(private maxConcurrent: number) {}
+    constructor(private maxConcurrent: number) { }
 
     async wait(): Promise<void> {
         if (this.running >= this.maxConcurrent) {
@@ -530,12 +542,21 @@ const zipQueue = new AsyncQueue(10);
 
 const sanitizeFilename = (name: string) => {
     if (!name) return 'unnamed_file';
-    // Prevent reserved names
-    if (/^(con|prn|aux|nul|com\d|lpt\d)$/i.test(name.split('.')[0])) {
-        return '_' + name;
+
+    // 1. Neutralize directory traversal attempts
+    let safe = name.replace(/\.\./g, '__');
+
+    // 2. Remove leading slashes to force relative paths
+    safe = safe.replace(/^\/+/, '');
+
+    // 3. Prevent reserved names (Windows) - check the first segment
+    const firstSegment = safe.split('/')[0].split('.')[0];
+    if (/^(con|prn|aux|nul|com\d|lpt\d)$/i.test(firstSegment)) {
+        safe = '_' + safe;
     }
-    // Sta ook spaties (\s) en haakjes () toe, dat oogt vriendelijker
-    return name.replace(/[^a-zA-Z0-9._\-\s\(\)]/g, '_');
+
+    // 4. Allow standard chars + forward slash (/)
+    return safe.replace(/[^a-zA-Z0-9._\-\s\(\)\/]/g, '_');
 };
 
 const formatBytes = (bytes: number, decimals = 2) => {
@@ -550,9 +571,9 @@ const formatBytes = (bytes: number, decimals = 2) => {
 const getTimeInMs = (val: number, unit: string) => {
     const u = unit.toLowerCase();
     const map: any = {
-        'minute': 60000,  'minutes': 60000,
-        'hour': 3600000,  'hours': 3600000,
-        'day': 86400000,  'days': 86400000,
+        'minute': 60000, 'minutes': 60000,
+        'hour': 3600000, 'hours': 3600000,
+        'day': 86400000, 'days': 86400000,
         'week': 604800000, 'weeks': 604800000,
         'month': 2592000000, 'months': 2592000000,
         'year': 31536000000, 'years': 31536000000
@@ -562,8 +583,8 @@ const getTimeInMs = (val: number, unit: string) => {
 
 const getBytes = (val: number, unit: string) => {
     const k = 1024;
-    const map: any = { 'B': 1, 'KB': k, 'KiB': 1024, 'MB': k*k, 'MiB': 1024*1024, 'GB': k*k*k, 'GiB': 1024*1024*1024, 'TB': k*k*k*k, 'TiB': 1024*1024*1024*1024 };
-    return val * (map[unit] || k*k*k);
+    const map: any = { 'B': 1, 'KB': k, 'KiB': 1024, 'MB': k * k, 'MiB': 1024 * 1024, 'GB': k * k * k, 'GiB': 1024 * 1024 * 1024, 'TB': k * k * k * k, 'TiB': 1024 * 1024 * 1024 * 1024 };
+    return val * (map[unit] || k * k * k);
 };
 
 // --- Global Cache Variables ---
@@ -578,10 +599,10 @@ async function getConfig() {
 
     try {
         const res = await pool.query('SELECT data, setup_completed FROM config WHERE id = 1');
-        
+
         const defaults = {
             appName: 'Nexo Share',
-            appUrl: 'http://localhost:3000',
+            appUrl: APP_URL, // Gebruikt nu de ENV variabele als default (indien DB leeg is)
             sessionVal: 7, sessionUnit: 'Days',
             secureCookies: false,
             shareIdLength: 12,
@@ -589,6 +610,8 @@ async function getConfig() {
             defaultExpirationVal: 1, defaultExpirationUnit: 'Weeks',
             maxExpirationVal: 0, maxExpirationUnit: 'Months',
             zipLevel: 5, zipNoMedia: true,
+            blockedExtensionsUser: [],
+            blockedExtensionsGuest: ['.exe', '.bat', '.cmd', '.sh', '.ps1', '.vbs', '.php', '.php3', '.php4', '.phtml', '.pl', '.py', '.cgi', '.jsp', '.asp', '.aspx', '.jar', '.msi', '.com', '.scr', '.hta', '.app', '.dmg', '.pkg'],
             smtpSecure: true, smtpStartTls: false,
             smtpAllowLocal: false,
             ssoAutoRedirect: false,
@@ -597,7 +620,7 @@ async function getConfig() {
             require2FA: false,
             allowPasskeys: true,
             allowPasswordReset: true,
-            appLocale: process.env.APP_LOCALE || 'en-GB', 
+            appLocale: process.env.APP_LOCALE || 'en-GB',
             serverTimezone: process.env.TZ || 'UTC'
         };
 
@@ -605,34 +628,34 @@ async function getConfig() {
 
         // Check if DB has data
         if (res && res.rows && res.rows.length > 0) {
-            finalConfig = { 
-                ...defaults, 
-                ...(res.rows[0].data || {}), 
+            finalConfig = {
+                ...defaults,
+                ...(res.rows[0].data || {}),
                 setupCompleted: res.rows[0].setup_completed || false
             };
         }
-        
+
         // Update Cache
         configCache = finalConfig;
         configCacheTime = Date.now();
-        
+
         return finalConfig;
     } catch (e) {
         console.error("GetConfig Error:", e);
-        return {}; 
+        return {};
     }
 }
 
 const generateSecureId = async () => {
     const config = await getConfig();
     const len = Math.max(8, parseInt(config.shareIdLength) || 12);
-    return crypto.randomBytes(Math.ceil(len/2)).toString('hex').slice(0, len);
+    return crypto.randomBytes(Math.ceil(len / 2)).toString('hex').slice(0, len);
 };
 
 const escapeHtml = (unsafe: string) => {
     if (!unsafe) return "";
     return unsafe.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
- };
+};
 
 const sanitizeEmailHeader = (input: string): string => {
     if (!input) return "";
@@ -667,9 +690,9 @@ const isValidAppUrl = (url: string): boolean => {
 };
 
 const isValidEmail = (email: string): boolean => {
-    return validator.isEmail(email, { 
+    return validator.isEmail(email, {
         allow_utf8_local_part: false,
-        require_tld: true 
+        require_tld: true
     });
 };
 
@@ -701,11 +724,11 @@ const encryptData = (data: string): string => {
     const key = crypto.scryptSync(JWT_SECRET, 'salt', 32);
     const iv = crypto.randomBytes(16);
     const cipher = crypto.createCipheriv(algorithm, key, iv);
-    
+
     let encrypted = cipher.update(data, 'utf8', 'hex');
     encrypted += cipher.final('hex');
     const authTag = cipher.getAuthTag().toString('hex');
-    
+
     return `${iv.toString('hex')}:${authTag}:${encrypted}`;
 };
 
@@ -713,13 +736,13 @@ const decryptData = (encryptedData: string): string => {
     const algorithm = 'aes-256-gcm';
     const key = crypto.scryptSync(JWT_SECRET, 'salt', 32);
     const [ivHex, authTagHex, encrypted] = encryptedData.split(':');
-    
+
     const decipher = crypto.createDecipheriv(algorithm, key, Buffer.from(ivHex, 'hex'));
     decipher.setAuthTag(Buffer.from(authTagHex, 'hex'));
-    
+
     let decrypted = decipher.update(encrypted, 'hex', 'utf8');
     decrypted += decipher.final('utf8');
-    
+
     return decrypted;
 };
 
@@ -772,8 +795,8 @@ async function sendEmail(to: string, subject: string, rawMessage: string, ctaLin
         let safeLink = '#';
         if (ctaLink && (ctaLink.startsWith('http://') || ctaLink.startsWith('https://'))) safeLink = ctaLink;
 
-        const logoHtml = config.logoUrl 
-            ? `<img src="${config.logoUrl}" alt="${safeAppName}" style="display: block; margin: 0 auto; max-height: 50px; border: 0; outline: none; text-decoration: none;">` 
+        const logoHtml = config.logoUrl
+            ? `<img src="${config.logoUrl}" alt="${safeAppName}" style="display: block; margin: 0 auto; max-height: 50px; border: 0; outline: none; text-decoration: none;">`
             : `<h1 style="margin: 0; color: #7c3aed; font-size: 24px; font-weight: bold; text-align: center;">${safeAppName}</h1>`;
 
         const buttonHtml = ctaLink ? `
@@ -795,8 +818,8 @@ async function sendEmail(to: string, subject: string, rawMessage: string, ctaLin
 
 // --- Audit Logging ---
 const logAudit = async (
-    userId: number | null, 
-    action: string, 
+    userId: number | null,
+    action: string,
     resourceType: string,
     resourceId: string,
     req: Request,
@@ -820,7 +843,7 @@ const parseCookies = (request: Request) => {
     const list: any = {};
     const cookieHeader = request.headers.cookie;
     if (!cookieHeader) return list;
-    cookieHeader.split(';').forEach(function(cookie) {
+    cookieHeader.split(';').forEach(function (cookie) {
         let [name, ...rest] = cookie.split('=');
         name = name?.trim();
         if (!name) return;
@@ -832,17 +855,17 @@ const parseCookies = (request: Request) => {
 };
 
 const authenticateToken: RequestHandler = (req, res, next) => {
-  // Probeer token uit HttpOnly cookie te halen, fallback naar header (voor API calls)
-  const cookies = parseCookies(req);
-  const token = cookies.token || req.headers['authorization']?.split(' ')[1];
+    // Probeer token uit HttpOnly cookie te halen, fallback naar header (voor API calls)
+    const cookies = parseCookies(req);
+    const token = cookies.token || req.headers['authorization']?.split(' ')[1];
 
-  if (!token) { res.status(401).json({ error: 'Access denied' }); return; }
-  
-  jwt.verify(token, JWT_SECRET, (err: any, decoded: any) => {
-    if (err) { res.status(403).json({ error: 'Invalid token' }); return; }
-    (req as AuthRequest).user = decoded as JWTPayload;
-    next();
-  });
+    if (!token) { res.status(401).json({ error: 'Access denied' }); return; }
+
+    jwt.verify(token, JWT_SECRET, (err: any, decoded: any) => {
+        if (err) { res.status(403).json({ error: 'Invalid token' }); return; }
+        (req as AuthRequest).user = decoded as JWTPayload;
+        next();
+    });
 };
 
 const requireAdmin: RequestHandler = (req, res, next) => {
@@ -867,31 +890,31 @@ const isValidSlug = (slug: string): boolean => {
     if (!slug || typeof slug !== 'string') return false;
     if (slug.length < 3 || slug.length > 50) return false; // Minimaal 3 karakters
     if (RESERVED_SLUGS.includes(slug.toLowerCase())) return false;
-    
+
     // ALLEEN letters, cijfers en koppeltekens/underscores toegestaan
     if (!/^[a-zA-Z0-9-_]+$/.test(slug)) return false;
-    
+
     // Mag niet beginnen of eindigen met een speciaal teken
     if (/^[-_]|[-_]$/.test(slug)) return false;
 
     // Geen dubbele speciale tekens (zoals -- of __)
     if (/[-_]{2,}/.test(slug)) return false;
-    
+
     return true;
 };
 
 const handleUploadId: RequestHandler = async (req, res, next) => {
     const authReq = req as AuthRequest;
-    
+
     // Bij multer uploads is body al geparsed, maar we moeten wel checken of het bestaat
     const customSlug = authReq.body?.customSlug;
-    
+
     if (customSlug && customSlug.trim() !== '') {
         const slug = customSlug.trim();
         if (!isValidSlug(slug)) {
             return res.status(400).json({ error: 'Link may only contain letters, numbers and hyphens.' });
         }
-        
+
         // Check of slug al bestaat, TENZIJ we een bestaande share updaten
         const currentId = authReq.params.id;
         if (!currentId || currentId !== slug) {
@@ -927,7 +950,7 @@ const scanFiles = async (files: Express.Multer.File[]) => {
         } else {
             // FAIL-OPEN: Scanner niet verplicht -> Warning en doorgaan
             console.warn("⚠️ Virusscan skipped: ClamAV is offline (not enforced).");
-            return; 
+            return;
         }
     }
 
@@ -936,13 +959,13 @@ const scanFiles = async (files: Express.Multer.File[]) => {
         try {
             const result = await clamscanInstance.isInfected(file.path);
             if (result.isInfected) {
-                await fs.unlink(file.path).catch(() => {});
+                await fs.unlink(file.path).catch(() => { });
                 throw new Error(`Virus detected in ${file.originalname}! Upload refused.`);
             }
         } catch (e: any) {
             // Als er een error is tijdens het scannen zelf (en het is geen virus melding)
             if (e.message.includes('Virus')) throw e;
-            
+
             // Ook hier: als scannen verplicht is, mag een error niet genegeerd worden
             if (config.clamavMustScan) {
                 console.error(`Scan error (Closed): ${e.message}`);
@@ -955,28 +978,28 @@ const scanFiles = async (files: Express.Multer.File[]) => {
 };
 
 const generateUploadId: RequestHandler = async (req, res, next) => {
-  (req as AuthRequest).uploadId = await generateSecureId();
-  next();
+    (req as AuthRequest).uploadId = await generateSecureId();
+    next();
 };
 
 const storage = multer.diskStorage({
-  destination: async (req, file, cb) => {
-    const authReq = req as AuthRequest;
-    const id = authReq.uploadId || await generateSecureId(); 
-    authReq.uploadId = id; 
-    const safeId = path.basename(id); 
-    const dir = path.join(UPLOAD_DIR, safeId);
-    try {
-        await fs.mkdir(dir, { recursive: true });
-        cb(null, dir);
-    } catch (e: any) {
-        cb(e, dir);
+    destination: async (req, file, cb) => {
+        const authReq = req as AuthRequest;
+        const id = authReq.uploadId || await generateSecureId();
+        authReq.uploadId = id;
+        const safeId = path.basename(id);
+        const dir = path.join(UPLOAD_DIR, safeId);
+        try {
+            await fs.mkdir(dir, { recursive: true });
+            cb(null, dir);
+        } catch (e: any) {
+            cb(e, dir);
+        }
+    },
+    filename: (req, file, cb) => {
+        const ext = path.extname(file.originalname);
+        cb(null, crypto.randomBytes(8).toString('hex') + ext);
     }
-  },
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname);
-    cb(null, crypto.randomBytes(8).toString('hex') + ext);
-  }
 });
 const upload = multer({ storage, limits: { fileSize: 1024 * 1024 * 1024 * 1024 } });
 
@@ -999,7 +1022,7 @@ const uploadSystem = multer({
         // SECURITY Check ook de extensie, niet alleen het mime-type
         const ext = path.extname(file.originalname).toLowerCase();
         const allowedExts = ['.png', '.jpg', '.jpeg', '.gif', '.svg', '.ico'];
-        
+
         if (allowedMimeTypes.includes(file.mimetype) && allowedExts.includes(ext)) {
             cb(null, true);
         } else {
@@ -1018,68 +1041,68 @@ apiRouter.post('/auth/login', loginLimiter, async (req, res) => {
     try {
         const { email, password } = req.body;
         const result = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
-        
+
         const genericError = 'Invalid account or password';
 
         // Timing Attack Preventie
         // Als user niet bestaat, doen we TOCH een compare tegen een dummy hash
         // zodat de responstijd altijd ongeveer gelijk is.
         if (result.rows.length === 0) {
-            await bcrypt.compare(password, '$2b$10$Xw.sY.f/O/W.S/./././././././././././././././.'); 
+            await bcrypt.compare(password, '$2b$10$Xw.sY.f/O/W.S/./././././././././././././././.');
             return res.status(401).json({ error: genericError });
         }
-        
+
         const user = result.rows[0];
         const valid = await bcrypt.compare(password, result.rows[0].password_hash);
         if (!valid) return res.status(401).json({ error: genericError });
-        
+
         // Check if 2FA is enabled for this user
         if (user.totp_enabled) {
             return res.json({ requires2FA: true, email: user.email });
         }
-        
+
         const config = await getConfig();
-        
+
         // Check if 2FA is required but not set up (only for non-SSO users)
         if (config.require2FA && !user.totp_enabled) {
             const token = jwt.sign({ id: user.id, email: user.email, isAdmin: user.is_admin }, JWT_SECRET, { expiresIn: '15m' });
-            
+
             // --- OOK HIER HET COOKIE ZETTEN ---
             // Dit is nodig zodat de vervolg-call naar '/auth/2fa/setup' geautoriseerd is
             const isProduction = process.env.NODE_ENV === 'production';
             const forceSecure = config.secureCookies || (config.appUrl && config.appUrl.startsWith('https://'));
 
             // Let op: we gebruiken hier de '15m' expiry van het tijdelijke token
-            res.cookie('token', token, { 
-                httpOnly: true, 
-                secure: isProduction ? forceSecure : false, 
-                sameSite: isProduction ? 'strict' : 'lax', 
+            res.cookie('token', token, {
+                httpOnly: true,
+                secure: isProduction ? forceSecure : false,
+                sameSite: isProduction ? 'strict' : 'lax',
                 maxAge: 15 * 60 * 1000 // 15 Minutes
             });
 
-            return res.json({ 
-                requiresSetup2FA: true, 
+            return res.json({
+                requiresSetup2FA: true,
                 // tempToken mag blijven voor legacy, maar cookie doet het werk
                 tempToken: token,
                 user: { id: user.id, email: user.email, name: user.name, is_admin: user.is_admin }
             });
         }
-        
+
         const token = jwt.sign({ id: user.id, email: user.email, isAdmin: user.is_admin }, JWT_SECRET, { expiresIn: getTimeInMs(config.sessionVal, config.sessionUnit) / 1000 });
         await logAudit(user.id, 'login', 'user', user.id.toString(), req);
-        
+
         // Bepaal of we lokaal draaien
         // Als we GEEN https gebruiken (lokaal), moet secure FALSE zijn en SameSite LAX
         const isProduction = process.env.NODE_ENV === 'production';
         const forceSecure = config.secureCookies || (config.appUrl && config.appUrl.startsWith('https://'));
 
-        res.cookie('token', token, { 
-            httpOnly: true, 
-            secure: isProduction ? forceSecure : false, 
-            sameSite: isProduction ? 'strict' : 'lax', 
+        res.cookie('token', token, {
+            httpOnly: true,
+            secure: isProduction ? forceSecure : false,
+            sameSite: isProduction ? 'strict' : 'lax',
             maxAge: getTimeInMs(config.sessionVal, config.sessionUnit)
         });
-        
+
         // Stuur user info terug, maar GEEN token in de body (zodat frontend het niet in localStorage zet)
         res.json({ success: true, user: { id: user.id, email: user.email, name: user.name, is_admin: user.is_admin } });
     } catch (e) { res.status(500).json({ error: 'Server error' }); }
@@ -1110,18 +1133,18 @@ apiRouter.post('/auth/logout', async (req, res) => {
 apiRouter.post('/auth/verify-2fa', loginLimiter, async (req, res) => {
     try {
         const { email, password, code } = req.body;
-        
+
         const result = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
         if (result.rows.length === 0) return res.status(401).json({ error: 'Invalid credentials' });
-        
+
         const user = result.rows[0];
         const validPassword = await bcrypt.compare(password, user.password_hash);
         if (!validPassword) return res.status(401).json({ error: 'Invalid credentials' });
-        
+
         if (!user.totp_enabled) return res.status(400).json({ error: '2FA not enabled' });
-        
+
         const secret = decryptData(user.totp_secret);
-        
+
         // Check TOTP code
         const validToken = speakeasy.totp.verify({
             secret,
@@ -1129,18 +1152,18 @@ apiRouter.post('/auth/verify-2fa', loginLimiter, async (req, res) => {
             token: code,
             window: 2
         });
-        
+
         if (!validToken) {
             // Check backup codes
             if (user.backup_codes) {
                 const backupCodes = JSON.parse(decryptData(user.backup_codes));
                 const hashedCode = crypto.createHash('sha256').update(code).digest('hex');
                 const codeIndex = backupCodes.findIndex((c: string) => c === hashedCode);
-                
+
                 if (codeIndex === -1) {
                     return res.status(401).json({ error: 'Invalid code' });
                 }
-                
+
                 // Remove used backup code
                 backupCodes.splice(codeIndex, 1);
                 const encryptedCodes = encryptData(JSON.stringify(backupCodes));
@@ -1149,23 +1172,23 @@ apiRouter.post('/auth/verify-2fa', loginLimiter, async (req, res) => {
                 return res.status(401).json({ error: 'Invalid code' });
             }
         }
-        
+
         const config = await getConfig();
         const token = jwt.sign(
-            { id: user.id, email: user.email, isAdmin: user.is_admin }, 
-            JWT_SECRET, 
+            { id: user.id, email: user.email, isAdmin: user.is_admin },
+            JWT_SECRET,
             { expiresIn: getTimeInMs(config.sessionVal, config.sessionUnit) / 1000 }
         );
-        
+
         await logAudit(user.id, 'login_2fa', 'user', user.id.toString(), req);
 
         const isProduction = process.env.NODE_ENV === 'production';
         const forceSecure = config.secureCookies || (config.appUrl && config.appUrl.startsWith('https://'));
 
-        res.cookie('token', token, { 
-            httpOnly: true, 
-            secure: isProduction ? forceSecure : false, 
-            sameSite: isProduction ? 'strict' : 'lax', 
+        res.cookie('token', token, {
+            httpOnly: true,
+            secure: isProduction ? forceSecure : false,
+            sameSite: isProduction ? 'strict' : 'lax',
             maxAge: getTimeInMs(config.sessionVal, config.sessionUnit)
         });
 
@@ -1181,16 +1204,16 @@ apiRouter.post('/auth/2fa/setup', authenticateToken, async (req, res) => {
     try {
         const authReq = req as AuthRequest;
         const config = await getConfig();
-        
+
         const secret = speakeasy.generateSecret({
             name: `${config.appName || 'Nexo Share'} (${authReq.user!.email})`,
             length: 32
         });
-        
+
         const qrCode = await QRCode.toDataURL(secret.otpauth_url!);
-        
-        res.json({ 
-            secret: secret.base32, 
+
+        res.json({
+            secret: secret.base32,
             qrCode,
             manualEntry: secret.base32
         });
@@ -1205,34 +1228,34 @@ apiRouter.post('/auth/2fa/enable', authenticateToken, async (req, res) => {
     try {
         const authReq = req as AuthRequest;
         const { secret, code } = req.body;
-        
+
         const verified = speakeasy.totp.verify({
             secret,
             encoding: 'base32',
             token: code,
             window: 2
         });
-        
+
         if (!verified) {
             return res.status(400).json({ error: 'Invalid code, try again' });
         }
-        
+
         // Generate backup codes
         const backupCodes = generateBackupCodes();
-        const hashedCodes = backupCodes.map(code => 
+        const hashedCodes = backupCodes.map(code =>
             crypto.createHash('sha256').update(code).digest('hex')
         );
-        
+
         const encryptedSecret = encryptData(secret);
         const encryptedBackups = encryptData(JSON.stringify(hashedCodes));
-        
+
         await pool.query(
             'UPDATE users SET totp_secret = $1, totp_enabled = TRUE, backup_codes = $2 WHERE id = $3',
             [encryptedSecret, encryptedBackups, authReq.user!.id]
         );
-        
+
         await logAudit(authReq.user!.id, '2fa_enabled', 'user', authReq.user!.id.toString(), req);
-        
+
         res.json({ success: true, backupCodes });
     } catch (e) {
         console.error(e);
@@ -1245,21 +1268,21 @@ apiRouter.post('/auth/2fa/disable', authenticateToken, async (req, res) => {
     try {
         const authReq = req as AuthRequest;
         const { password } = req.body;
-        
+
         const result = await pool.query('SELECT password_hash FROM users WHERE id = $1', [authReq.user!.id]);
         const valid = await bcrypt.compare(password, result.rows[0].password_hash);
-        
+
         if (!valid) {
             return res.status(401).json({ error: 'Incorrect Password' });
         }
-        
+
         await pool.query(
             'UPDATE users SET totp_secret = NULL, totp_enabled = FALSE, backup_codes = NULL WHERE id = $1',
             [authReq.user!.id]
         );
-        
+
         await logAudit(authReq.user!.id, '2fa_disabled', 'user', authReq.user!.id.toString(), req);
-        
+
         res.json({ success: true });
     } catch (e) {
         console.error(e);
@@ -1272,17 +1295,17 @@ apiRouter.get('/auth/2fa/status', authenticateToken, async (req, res) => {
     try {
         const authReq = req as AuthRequest;
         const result = await pool.query(
-            'SELECT totp_enabled, backup_codes FROM users WHERE id = $1', 
+            'SELECT totp_enabled, backup_codes FROM users WHERE id = $1',
             [authReq.user!.id]
         );
-        
+
         let backupCodesRemaining = 0;
         if (result.rows[0].backup_codes) {
             const codes = JSON.parse(decryptData(result.rows[0].backup_codes));
             backupCodesRemaining = codes.length;
         }
-        
-        res.json({ 
+
+        res.json({
             enabled: result.rows[0].totp_enabled,
             backupCodesRemaining
         });
@@ -1299,10 +1322,10 @@ apiRouter.post('/users/:id/2fa/reset', authenticateToken, requireAdmin, async (r
             'UPDATE users SET totp_secret = NULL, totp_enabled = FALSE, backup_codes = NULL WHERE id = $1',
             [req.params.id]
         );
-        
+
         const authReq = req as AuthRequest;
         await logAudit(authReq.user!.id, '2fa_admin_reset', 'user', req.params.id, req);
-        
+
         res.json({ success: true });
     } catch (e) {
         console.error(e);
@@ -1315,16 +1338,16 @@ apiRouter.post('/passkeys/register/options', authenticateToken, async (req, res)
     try {
         const authReq = req as AuthRequest;
         const user = await pool.query('SELECT * FROM users WHERE id = $1', [authReq.user!.id]);
-        
+
         // HAAL DOMEIN UIT DATABASE CONFIG OF REQUEST HEADER
         const config = await getConfig();
         const baseUrl = getBaseUrl(config, req);
         const rpID = new URL(baseUrl).hostname; // Pakt alleen 'wetransfer.famretera.nl'
-        
+
         const options = await generateRegistrationOptions({
             rpName: config.appName || 'Nexo Share',
             rpID: rpID, // Dynamisch!
-            userID: Buffer.from(user.rows[0].id.toString()).toString('base64url'), 
+            userID: Buffer.from(user.rows[0].id.toString()).toString('base64url'),
             userName: user.rows[0].email,
             userDisplayName: user.rows[0].name,
             attestationType: 'none',
@@ -1333,7 +1356,7 @@ apiRouter.post('/passkeys/register/options', authenticateToken, async (req, res)
                 userVerification: 'preferred',
             },
         });
-        
+
         req.app.locals[`challenge_${authReq.user!.id}`] = options.challenge;
         res.json(options);
     } catch (e) {
@@ -1347,35 +1370,35 @@ apiRouter.post('/passkeys/register/verify', authenticateToken, async (req, res) 
     try {
         const authReq = req as AuthRequest;
         const { response, name } = req.body;
-        
+
         // CONFIG OPHALEN
         const config = await getConfig();
         const baseUrl = getBaseUrl(config, req);
         const rpID = new URL(baseUrl).hostname;
-        
+
         const expectedChallenge = req.app.locals[`challenge_${authReq.user!.id}`];
-        
+
         const verification = await verifyRegistrationResponse({
             response: response as any,
             expectedChallenge,
             expectedOrigin: baseUrl, // Checkt: https://wetransfer.famretera.nl
             expectedRPID: rpID,      // Checkt: wetransfer.famretera.nl
         });
-        
+
         if (verification.verified && verification.registrationInfo) {
             const { credentialID, credentialPublicKey, counter } = verification.registrationInfo;
-            
+
             await pool.query(
                 'INSERT INTO passkeys (user_id, credential_id, public_key, counter, name) VALUES ($1, $2, $3, $4, $5)',
                 [
-                    authReq.user!.id, 
+                    authReq.user!.id,
                     Buffer.from(credentialID).toString('base64'),
                     Buffer.from(credentialPublicKey).toString('base64'),
                     counter,
                     name || 'Unnamed Passkey'
                 ]
             );
-            
+
             delete req.app.locals[`challenge_${authReq.user!.id}`];
             await logAudit(authReq.user!.id, 'passkey_registered', 'user', authReq.user!.id.toString(), req);
             res.json({ success: true });
@@ -1411,9 +1434,9 @@ apiRouter.delete('/passkeys/:id', authenticateToken, async (req, res) => {
             'DELETE FROM passkeys WHERE id = $1 AND user_id = $2',
             [req.params.id, authReq.user!.id]
         );
-        
+
         await logAudit(authReq.user!.id, 'passkey_deleted', 'user', authReq.user!.id.toString(), req);
-        
+
         res.json({ success: true });
     } catch (e) {
         console.error(e);
@@ -1432,11 +1455,11 @@ apiRouter.post('/passkeys/auth/options', async (req, res) => {
             rpID: rpID, // Dynamisch
             userVerification: 'preferred',
         });
-        
+
         // Voorkom memory leak. Verwijder de challenge automatisch na 2 minuten.
         const challengeKey = `auth_challenge_${options.challenge}`;
         req.app.locals[challengeKey] = options.challenge;
-        
+
         setTimeout(() => {
             if (req.app.locals[challengeKey]) delete req.app.locals[challengeKey];
         }, 120000); // 2 minuten
@@ -1453,19 +1476,19 @@ apiRouter.post('/passkeys/auth/verify', async (req, res) => {
     try {
         const { response, challenge } = req.body;
         const credentialID = Buffer.from(response.id, 'base64url').toString('base64');
-        
+
         const passkeyResult = await pool.query(
             'SELECT p.*, u.id as user_id, u.email, u.name, u.is_admin FROM passkeys p JOIN users u ON p.user_id = u.id WHERE p.credential_id = $1',
             [credentialID]
         );
-        
+
         if (passkeyResult.rows.length === 0) {
             return res.status(400).json({ error: 'Passkey not found' });
         }
-        
+
         const passkey = passkeyResult.rows[0];
         const expectedChallenge = req.app.locals[`auth_challenge_${challenge}`];
-        
+
         const config = await getConfig();
         const baseUrl = getBaseUrl(config, req);
         const rpID = new URL(baseUrl).hostname;
@@ -1481,34 +1504,34 @@ apiRouter.post('/passkeys/auth/verify', async (req, res) => {
                 counter: parseInt(passkey.counter)
             }
         });
-        
+
         if (verification.verified) {
             await pool.query(
                 'UPDATE passkeys SET counter = $1 WHERE id = $2',
                 [verification.authenticationInfo.newCounter, passkey.id]
             );
-            
+
             const token = jwt.sign(
-                { id: passkey.user_id, email: passkey.email, isAdmin: passkey.is_admin }, 
-                JWT_SECRET, 
+                { id: passkey.user_id, email: passkey.email, isAdmin: passkey.is_admin },
+                JWT_SECRET,
                 { expiresIn: getTimeInMs(config.sessionVal, config.sessionUnit) / 1000 }
             );
-            
+
             delete req.app.locals[`auth_challenge_${response.response.challenge}`];
 
             // COOKIE ZETTEN (Net als bij SSO en Login)
             const isProduction = process.env.NODE_ENV === 'production';
             const forceSecure = config.secureCookies || (config.appUrl && config.appUrl.startsWith('https://'));
 
-            res.cookie('token', token, { 
-                httpOnly: true, 
-                secure: isProduction ? forceSecure : false, 
-                sameSite: isProduction ? 'strict' : 'lax', 
+            res.cookie('token', token, {
+                httpOnly: true,
+                secure: isProduction ? forceSecure : false,
+                sameSite: isProduction ? 'strict' : 'lax',
                 maxAge: getTimeInMs(config.sessionVal, config.sessionUnit)
             });
-            
-            res.json({ 
-                user: { id: passkey.user_id, email: passkey.email, name: passkey.name, is_admin: passkey.is_admin } 
+
+            res.json({
+                user: { id: passkey.user_id, email: passkey.email, name: passkey.name, is_admin: passkey.is_admin }
             });
         } else {
             res.status(400).json({ error: 'Verification failed' });
@@ -1523,16 +1546,16 @@ apiRouter.post('/passkeys/auth/verify', async (req, res) => {
 apiRouter.post('/auth/password-reset/request', passwordResetLimiter, async (req, res) => {
     try {
         const { email } = req.body;
-        
+
         const config = await getConfig();
         if (!config.allowPasswordReset) {
             return res.status(403).json({ error: 'Password reset is disabled' });
         }
-        
+
         if (!config.smtpHost) {
             return res.status(503).json({ error: 'Email is not configured' });
         }
-        
+
         const userResult = await pool.query('SELECT id, name FROM users WHERE LOWER(email) = LOWER($1)', [email]);
 
         // Always return success to prevent email enumeration
@@ -1542,22 +1565,22 @@ apiRouter.post('/auth/password-reset/request', passwordResetLimiter, async (req,
             await new Promise(resolve => setTimeout(resolve, Math.random() * 200 + 100)); // 100-300ms delay
             return res.json({ success: true });
         }
-        
+
         const user = userResult.rows[0];
         const token = crypto.randomBytes(32).toString('hex');
         const expiresAt = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
-        
+
         await pool.query(
             'INSERT INTO password_reset_tokens (user_id, token, expires_at) VALUES ($1, $2, $3)',
             [user.id, token, expiresAt]
         );
-        
+
         // Geef 'req' mee aan de functie
         const baseUrl = getBaseUrl(config, req);
         if (!baseUrl) return res.status(500).json({ error: 'Server URL niet geconfigureerd' });
 
         const resetUrl = `${baseUrl}/reset-password?token=${token}`;
-        
+
         await sendEmail(
             email,
             'Reset Password',
@@ -1567,7 +1590,7 @@ apiRouter.post('/auth/password-reset/request', passwordResetLimiter, async (req,
             resetUrl,
             'Reset Password'
         );
-        
+
         res.json({ success: true });
     } catch (e) {
         console.error(e);
@@ -1579,20 +1602,20 @@ apiRouter.post('/auth/password-reset/request', passwordResetLimiter, async (req,
 apiRouter.post('/auth/password-reset/verify', async (req, res) => {
     try {
         const { token } = req.body;
-        
+
         const result = await pool.query(
             'SELECT user_id, expires_at, used FROM password_reset_tokens WHERE token = $1',
             [token]
         );
-        
+
         if (result.rows.length === 0 || result.rows[0].used) {
             return res.status(400).json({ error: 'Invalid or expired token' });
         }
-        
+
         if (new Date() > new Date(result.rows[0].expires_at)) {
             return res.status(400).json({ error: 'Token expired' });
         }
-        
+
         res.json({ valid: true });
     } catch (e) {
         console.error(e);
@@ -1604,30 +1627,30 @@ apiRouter.post('/auth/password-reset/verify', async (req, res) => {
 apiRouter.post('/auth/password-reset/complete', async (req, res) => {
     try {
         const { token, password } = req.body;
-        
+
         const passwordCheck = isStrongPassword(password);
         if (!passwordCheck.valid) {
             return res.status(400).json({ error: passwordCheck.error });
         }
-        
+
         const result = await pool.query(
             'SELECT user_id, expires_at, used FROM password_reset_tokens WHERE token = $1',
             [token]
         );
-        
+
         if (result.rows.length === 0 || result.rows[0].used) {
             return res.status(400).json({ error: 'Invalid or expired token' });
         }
-        
+
         if (new Date() > new Date(result.rows[0].expires_at)) {
             return res.status(400).json({ error: 'Token expired' });
         }
-        
+
         const hash = await bcrypt.hash(password, 10);
-        
+
         await pool.query('UPDATE users SET password_hash = $1 WHERE id = $2', [hash, result.rows[0].user_id]);
         await pool.query('UPDATE password_reset_tokens SET used = TRUE WHERE token = $1', [token]);
-        
+
         res.json({ success: true });
     } catch (e) {
         console.error(e);
@@ -1640,16 +1663,16 @@ apiRouter.get('/auth/check-2fa-requirement', authenticateToken, async (req, res)
     try {
         const authReq = req as AuthRequest;
         const config = await getConfig();
-        
+
         if (!config.require2FA) {
             return res.json({ required: false });
         }
-        
+
         const result = await pool.query(
             'SELECT totp_enabled FROM users WHERE id = $1',
             [authReq.user!.id]
         );
-        
+
         res.json({ required: !result.rows[0].totp_enabled });
     } catch (e) {
         console.error(e);
@@ -1662,7 +1685,7 @@ apiRouter.get('/utils/generate-id', authenticateToken, async (req, res) => {
     const length = parseInt(req.query.length as string) || 12;
     // Cap length voor veiligheid
     const safeLength = Math.min(Math.max(length, 8), 64);
-    const id = crypto.randomBytes(Math.ceil(safeLength/2)).toString('hex').slice(0, safeLength);
+    const id = crypto.randomBytes(Math.ceil(safeLength / 2)).toString('hex').slice(0, safeLength);
     res.json({ id });
 });
 
@@ -1671,7 +1694,7 @@ apiRouter.get('/utils/qr', async (req, res) => {
     try {
         const url = req.query.url as string;
         if (!url) return res.status(400).send('URL required');
-        
+
         // Genereer QR als Data URL
         const qr = await QRCode.toDataURL(url, {
             margin: 1,
@@ -1700,8 +1723,8 @@ apiRouter.get('/auth/sso', async (req, res) => {
         }
 
         let issuerOrigin = '';
-        try { 
-            issuerOrigin = new URL(config.oidcIssuer).origin; 
+        try {
+            issuerOrigin = new URL(config.oidcIssuer).origin;
         } catch (e) {
             console.error('[SSO DEBUG] Invalid Issuer URL:', config.oidcIssuer);
             return res.status(500).send('Invalid SSO Configuration');
@@ -1716,10 +1739,10 @@ apiRouter.get('/auth/sso', async (req, res) => {
         });
 
         const targetUrl = `${issuerOrigin}/application/o/authorize/?${params.toString()}`;
-        
+
         // Zet een tijdelijke cookie om CSRF te voorkomen
         res.cookie('sso_init', '1', { httpOnly: true, maxAge: 300000, sameSite: 'lax' });
-        
+
         console.log('[SSO DEBUG] Redirecting to:', targetUrl);
         res.redirect(targetUrl);
     } catch (e: any) {
@@ -1742,15 +1765,15 @@ apiRouter.get('/auth/callback', async (req, res) => {
         res.clearCookie('sso_init'); // Cookie opruimen
 
         const config = await getConfig();
-        
+
         // Validate appUrl
         if (!isValidAppUrl(config.appUrl)) {
             console.error('[SSO] Invalid appUrl configured');
             return res.status(500).send('Invalid SSO configuration');
         }
-        
+
         let issuerOrigin = '';
-        try { issuerOrigin = new URL(config.oidcIssuer).origin; } catch (e) {}
+        try { issuerOrigin = new URL(config.oidcIssuer).origin; } catch (e) { }
 
         const redirectUri = `${cleanUrl(config.appUrl)}/api/auth/callback`;
         console.log('[SSO DEBUG] Callback received.');
@@ -1781,7 +1804,7 @@ apiRouter.get('/auth/callback', async (req, res) => {
             const countRes = await pool.query('SELECT COUNT(*) FROM users');
             const isAdmin = parseInt(countRes.rows[0].count) === 0;
             const dummyHash = await bcrypt.hash(crypto.randomBytes(16).toString('hex'), 10);
-            
+
             const insertRes = await pool.query(
                 'INSERT INTO users (email, password_hash, name, is_admin) VALUES ($1, $2, $3, $4) RETURNING *',
                 [email, dummyHash, userData.name || userData.preferred_username || 'SSO User', isAdmin]
@@ -1792,8 +1815,8 @@ apiRouter.get('/auth/callback', async (req, res) => {
         }
 
         const token = jwt.sign(
-            { id: user.id, email: user.email, isAdmin: user.is_admin }, 
-            JWT_SECRET, 
+            { id: user.id, email: user.email, isAdmin: user.is_admin },
+            JWT_SECRET,
             { expiresIn: getTimeInMs(config.sessionVal, config.sessionUnit) / 1000 }
         );
 
@@ -1836,25 +1859,25 @@ apiRouter.get('/auth/callback', async (req, res) => {
 apiRouter.post('/auth/sso-exchange', async (req, res) => {
     try {
         const { nonce } = req.body;
-        
+
         if (!nonce || typeof nonce !== 'string') {
             return res.status(400).json({ error: 'Nonce required' });
         }
-        
+
         // Atomische operatie (Check & Delete in één keer)
         const result = await pool.query(
             'DELETE FROM sso_tokens WHERE nonce = $1 RETURNING token, user_data, expires_at',
             [nonce]
         );
-        
+
         if (result.rows.length === 0) {
             return res.status(401).json({ error: 'Invalid or expired nonce' });
         }
-        
+
         let { token, user_data, expires_at } = result.rows[0];
-        
+
         // Decrypt token
-        try { token = decryptData(token); } catch(e) { return res.status(500).json({error: 'Token decryption error'}); }
+        try { token = decryptData(token); } catch (e) { return res.status(500).json({ error: 'Token decryption error' }); }
 
         // Check expiration
         if (new Date() > new Date(expires_at)) {
@@ -1866,13 +1889,13 @@ apiRouter.post('/auth/sso-exchange', async (req, res) => {
         const isProduction = process.env.NODE_ENV === 'production';
         const forceSecure = config.secureCookies || (config.appUrl && config.appUrl.startsWith('https://'));
 
-        res.cookie('token', token, { 
-            httpOnly: true, 
-            secure: isProduction ? forceSecure : false, 
-            sameSite: isProduction ? 'strict' : 'lax', 
+        res.cookie('token', token, {
+            httpOnly: true,
+            secure: isProduction ? forceSecure : false,
+            sameSite: isProduction ? 'strict' : 'lax',
             maxAge: getTimeInMs(config.sessionVal, config.sessionUnit)
         });
-        
+
         res.json({ token, user: user_data });
     } catch (e: any) {
         console.error('[SSO Exchange Error]:', e.message);
@@ -1885,9 +1908,9 @@ apiRouter.get('/config', async (req, res) => {
     try {
         const config = await getConfig();
         const authReq = req as AuthRequest;
-        
-        const publicConfig = { 
-            appName: config.appName, 
+
+        const publicConfig = {
+            appName: config.appName,
             logoUrl: config.logoUrl,
             faviconUrl: config.faviconUrl,
             ssoEnabled: config.ssoEnabled,
@@ -1904,7 +1927,7 @@ apiRouter.get('/config', async (req, res) => {
         const token = cookies.token || (authReq.headers['authorization'] && authReq.headers['authorization'].split(' ')[1]);
 
         if (!token) return res.json(publicConfig);
-        
+
         jwt.verify(token!, JWT_SECRET!, (err: any, decoded: any) => {
             if (err) return res.json(publicConfig);
             if (decoded && decoded.isAdmin) {
@@ -1912,7 +1935,7 @@ apiRouter.get('/config', async (req, res) => {
                 const safeConfig = { ...config };
                 if (safeConfig.smtpPass) safeConfig.smtpPass = '********';
                 if (safeConfig.oidcSecret) safeConfig.oidcSecret = '********';
-                
+
                 res.json(safeConfig);
             } else {
                 res.json(publicConfig);
@@ -1945,7 +1968,7 @@ apiRouter.post('/config/branding', uploadSystem.fields([{ name: 'logo', maxCount
     try {
         const files = req.files as { [fieldname: string]: Express.Multer.File[] };
         const currentConfig = await getConfig();
-        
+
         if (files.logo && files.logo[0]) currentConfig.logoUrl = `/api/uploads/system/${files.logo[0].filename}`;
         if (files.favicon && files.favicon[0]) currentConfig.faviconUrl = `/api/uploads/system/${files.favicon[0].filename}`;
 
@@ -1969,14 +1992,14 @@ apiRouter.put('/config', async (req, res) => {
         if (newConfig.oidcSecret === '********') newConfig.oidcSecret = currentConfig.oidcSecret;
 
         // Behoud setup_completed status tenzij expliciet meegegeven (voorkomt per ongeluk resetten)
-        newConfig.setup_completed = currentConfig.setupCompleted; 
+        newConfig.setup_completed = currentConfig.setupCompleted;
 
         await pool.query(
             `INSERT INTO config (id, data, setup_completed) VALUES (1, $1, $2) 
-             ON CONFLICT (id) DO UPDATE SET data = $1`, 
+             ON CONFLICT (id) DO UPDATE SET data = $1`,
             [newConfig, currentConfig.setupCompleted || false]
         );
-        
+
         configCache = null; // Cache invalidatie
         configCacheTime = 0;
         res.json({ success: true });
@@ -2063,26 +2086,26 @@ apiRouter.post('/users', async (req, res) => {
     }
 
     const { email, password, name, is_admin } = req.body;
-    
+
     // Validate email
     if (!isValidEmail(email)) {
         return res.status(400).json({ error: 'Invalid email address' });
     }
-    
+
     // Validate password strength
     const passwordCheck = isStrongPassword(password);
     if (!passwordCheck.valid) {
         return res.status(400).json({ error: passwordCheck.error });
     }
-    
+
     const hash = await bcrypt.hash(password, 10);
-    try { 
-        const result = await pool.query('INSERT INTO users (email, password_hash, name, is_admin) VALUES ($1, $2, $3, $4) RETURNING id', [email, hash, name, is_admin]); 
+    try {
+        const result = await pool.query('INSERT INTO users (email, password_hash, name, is_admin) VALUES ($1, $2, $3, $4) RETURNING id', [email, hash, name, is_admin]);
         await logAudit((req as AuthRequest).user!.id, 'user_created', 'user', result.rows[0].id.toString(), req, { email, is_admin });
         res.json({ success: true });
-    } catch (e) { 
+    } catch (e) {
         console.error(e);
-        res.status(500).json({ error: 'Could not create user' }); 
+        res.status(500).json({ error: 'Could not create user' });
     }
 });
 
@@ -2096,11 +2119,11 @@ apiRouter.get('/users/me', authenticateToken, async (req, res) => {
             'SELECT id, email, name, is_admin, totp_enabled, created_at FROM users WHERE id = $1',
             [authReq.user!.id]
         );
-        
+
         if (result.rows.length === 0) {
             return res.status(404).json({ error: 'User not found' });
         }
-        
+
         res.json(result.rows[0]);
     } catch (e) {
         console.error(e);
@@ -2127,7 +2150,7 @@ apiRouter.put('/users/profile', authenticateToken, async (req, res) => {
         // Require Current Password
         const { currentPassword } = authReq.body;
         if (!currentPassword) return res.status(400).json({ error: 'Current password is required to change.' });
-        
+
         const userRes = await pool.query('SELECT password_hash FROM users WHERE id = $1', [myId]);
         const valid = await bcrypt.compare(currentPassword, userRes.rows[0].password_hash);
         if (!valid) return res.status(401).json({ error: 'Current password is wrong' });
@@ -2137,7 +2160,7 @@ apiRouter.put('/users/profile', authenticateToken, async (req, res) => {
         if (!passwordCheck.valid) {
             return res.status(400).json({ error: passwordCheck.error });
         }
-        
+
         const hash = await bcrypt.hash(password, 10);
         updates.push(`password_hash = $${i}`);
         values.push(hash);
@@ -2149,35 +2172,35 @@ apiRouter.put('/users/profile', authenticateToken, async (req, res) => {
     try {
         // Nu klopt de nummering: $1, $2, ($3 Optional), en ID is de laatste
         await pool.query(`UPDATE users SET ${updates.join(', ')} WHERE id = $${i}`, values);
-        
+
         // Ververs het JWT Cookie met de nieuwe gegevens
         const config = await getConfig();
         const userRes = await pool.query('SELECT id, email, name, is_admin FROM users WHERE id = $1', [myId]);
         const updatedUser = userRes.rows[0];
-        
+
         const token = jwt.sign(
-            { id: updatedUser.id, email: updatedUser.email, isAdmin: updatedUser.is_admin }, 
-            JWT_SECRET, 
+            { id: updatedUser.id, email: updatedUser.email, isAdmin: updatedUser.is_admin },
+            JWT_SECRET,
             { expiresIn: getTimeInMs(config.sessionVal, config.sessionUnit) / 1000 }
         );
 
         const isProduction = process.env.NODE_ENV === 'production';
         const forceSecure = config.secureCookies || (config.appUrl && config.appUrl.startsWith('https://'));
 
-        res.cookie('token', token, { 
-            httpOnly: true, 
-            secure: isProduction ? forceSecure : false, 
-            sameSite: isProduction ? 'strict' : 'lax', 
+        res.cookie('token', token, {
+            httpOnly: true,
+            secure: isProduction ? forceSecure : false,
+            sameSite: isProduction ? 'strict' : 'lax',
             maxAge: getTimeInMs(config.sessionVal, config.sessionUnit)
         });
 
         res.json({ success: true, user: updatedUser });
-    } catch (e: any) { 
+    } catch (e: any) {
         if (e.code === '23505') {
             return res.status(409).json({ error: 'This email address is already in use.' });
         }
         console.error(e);
-        res.status(500).json({ error: 'Server error' }); 
+        res.status(500).json({ error: 'Server error' });
     }
 });
 
@@ -2186,22 +2209,22 @@ apiRouter.delete('/users/me/delete', authenticateToken, async (req, res) => {
     try {
         const authReq = req as AuthRequest;
         const { password } = req.body;
-        
+
         // Verify password
         const result = await pool.query('SELECT password_hash FROM users WHERE id = $1', [authReq.user!.id]);
         const valid = await bcrypt.compare(password, result.rows[0].password_hash);
-        
+
         if (!valid) {
             return res.status(401).json({ error: 'Incorrect Password' });
         }
-        
+
         await logAudit(authReq.user!.id, 'self_delete', 'user', authReq.user!.id.toString(), req);
         await pool.query('DELETE FROM users WHERE id = $1', [authReq.user!.id]);
-        
+
         res.json({ success: true });
-    } catch (e) { 
+    } catch (e) {
         console.error(e);
-        res.status(500).json({ error: 'Deletion failed' }); 
+        res.status(500).json({ error: 'Deletion failed' });
     }
 });
 
@@ -2212,7 +2235,7 @@ apiRouter.put('/users/:id', authenticateToken, requireAdmin, async (req, res) =>
     const authReq = req as AuthRequest;
     const { email, password, name, is_admin } = authReq.body;
     const targetId = authReq.params.id;
-    
+
     // Voorkom dat een admin zichzelf degradeert
     if (parseInt(targetId) === authReq.user!.id && is_admin === false) {
         return res.status(403).json({ error: 'You cannot remove your own admin privileges.' });
@@ -2222,21 +2245,21 @@ apiRouter.put('/users/:id', authenticateToken, requireAdmin, async (req, res) =>
     if (!isValidEmail(email)) {
         return res.status(400).json({ error: 'Invalid email address' });
     }
-    
+
     let updates = [`name = $1`, `email = $2`, `is_admin = $3`];
     let values = [name, email, is_admin];
-    let i = 4; 
+    let i = 4;
 
     if (password && password.trim() !== "") {
         const passwordCheck = isStrongPassword(password);
         if (!passwordCheck.valid) {
             return res.status(400).json({ error: passwordCheck.error });
         }
-        
+
         const hash = await bcrypt.hash(password, 10);
-        updates.push(`password_hash = $${i}`); 
+        updates.push(`password_hash = $${i}`);
         values.push(hash);
-        i++; 
+        i++;
     }
 
     values.push(targetId);
@@ -2244,12 +2267,12 @@ apiRouter.put('/users/:id', authenticateToken, requireAdmin, async (req, res) =>
     try {
         await pool.query(`UPDATE users SET ${updates.join(', ')} WHERE id = $${i}`, values);
         res.json({ success: true });
-    } catch (e: any) { 
+    } catch (e: any) {
         if (e.code === '23505') {
             return res.status(409).json({ error: 'This email address is already in use.' });
         }
         console.error(e);
-        res.status(500).json({ error: 'Server error' }); 
+        res.status(500).json({ error: 'Server error' });
     }
 });
 
@@ -2257,7 +2280,7 @@ apiRouter.put('/users/:id', authenticateToken, requireAdmin, async (req, res) =>
 apiRouter.delete('/users/:id', authenticateToken, requireAdmin, async (req, res) => {
     const userId = req.params.id;
     const authReq = req as AuthRequest;
-    
+
     // Prevent self-delete via admin panel
     if (authReq.user!.id === parseInt(userId)) {
         return res.status(403).json({ error: 'Use profile options to delete yourself.' });
@@ -2266,10 +2289,10 @@ apiRouter.delete('/users/:id', authenticateToken, requireAdmin, async (req, res)
     try {
         // 1. Haal alle shares van deze gebruiker op
         const userShares = await pool.query('SELECT id FROM shares WHERE user_id = $1', [userId]);
-        
+
         // 2. Verwijder fysieke mappen van deze shares
         for (const row of userShares.rows) {
-            await fs.rm(path.join(UPLOAD_DIR, row.id), { recursive: true, force: true }).catch(() => {});
+            await fs.rm(path.join(UPLOAD_DIR, row.id), { recursive: true, force: true }).catch(() => { });
         }
 
         // 3. Verwijder gebruiker (Cascade zou shares/files uit DB moeten halen als FK goed staat, 
@@ -2277,12 +2300,12 @@ apiRouter.delete('/users/:id', authenticateToken, requireAdmin, async (req, res)
         await pool.query('DELETE FROM shares WHERE user_id = $1', [userId]);
         await pool.query('DELETE FROM reverse_shares WHERE user_id = $1', [userId]); // Ook reverse shares!
         await pool.query('DELETE FROM users WHERE id = $1', [userId]);
-        
+
         await logAudit(authReq.user!.id, 'user_deleted', 'user', userId, req);
         res.json({ success: true });
-    } catch (e) { 
+    } catch (e) {
         console.error(e);
-        res.status(500).json({ error: 'Server error while deleting user' }); 
+        res.status(500).json({ error: 'Server error while deleting user' });
     }
 });
 
@@ -2306,12 +2329,12 @@ apiRouter.post('/shares/init', authenticateToken, uploadLimiter, handleUploadId,
     try {
         const { name, expirationVal, expirationUnit, recipients, message, password, maxDownloads } = authReq.body;
         const shareId = authReq.uploadId!;
-        
+
         const passwordHash = password ? await bcrypt.hash(password, 10) : null;
         const config = await getConfig();
-        
+
         let expiresAt = null;
-        
+
         // 1. Definiëer unit (standaard uit config als niet meegegeven)
         let unit = expirationUnit || config.defaultExpirationUnit;
 
@@ -2319,7 +2342,7 @@ apiRouter.post('/shares/init', authenticateToken, uploadLimiter, handleUploadId,
         // 2. Check of de gebruiker expliciet iets heeft meegestuurd (inclusief 0 of lege string)
         if (expirationVal !== undefined && expirationVal !== null && expirationVal !== '') {
             val = parseInt(expirationVal);
-            
+
             // Als parseInt faalt (bijv. lege string ""), maak er expliciet 0 van (Nooit)
             if (isNaN(val)) val = 0;
         } else {
@@ -2344,7 +2367,7 @@ apiRouter.post('/shares/init', authenticateToken, uploadLimiter, handleUploadId,
         }
 
         try {
-            await client.query(`INSERT INTO shares (id, user_id, name, password_hash, expires_at, recipients, message, max_downloads) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, 
+            await client.query(`INSERT INTO shares (id, user_id, name, password_hash, expires_at, recipients, message, max_downloads) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
                 [shareId, authReq.user!.id, name || 'Share', passwordHash, expiresAt, recipients, message, maxDownloads || null]);
         } catch (err: any) {
             // Check voor Postgres Unique Violation error code (23505)
@@ -2353,7 +2376,7 @@ apiRouter.post('/shares/init', authenticateToken, uploadLimiter, handleUploadId,
             }
             throw err;
         }
-        
+
         // Maak alvast de map aan
         const shareDir = path.join(UPLOAD_DIR, shareId);
         await fs.mkdir(shareDir, { recursive: true });
@@ -2371,53 +2394,68 @@ apiRouter.post('/shares/init', authenticateToken, uploadLimiter, handleUploadId,
 // We zetten de limiet hier ruim (500MB), de echte beperking wordt bepaald door
 // de chunk-grootte die de frontend hanteert (via config) en de Cloudflare limiet.
 const chunkStorage = multer.diskStorage({
-  destination: TEMP_DIR,
-  filename: (req, file, cb) => {
-    // Sla de chunk op met een willekeurige naam
-    cb(null, `chunk_${crypto.randomBytes(8).toString('hex')}`);
-  }
+    destination: TEMP_DIR,
+    filename: (req, file, cb) => {
+        // Sla de chunk op met een willekeurige naam
+        cb(null, `chunk_${crypto.randomBytes(8).toString('hex')}`);
+    }
 });
 
 // 1. Authenticated Uploads (Alles toegestaan, want gebruiker is vertrouwd)
-const chunkUploadAuth = multer({ 
-    storage: chunkStorage, 
-    limits: { fileSize: 500 * 1024 * 1024, files: 1 }
-});
+// 1. Authenticated Uploads
+// --- Helper voor Extensie Checks ---
+const checkExtension = (filename: string, blocklist: string[]) => {
+    // 1. Basic Extension Check
+    const ext = path.extname(filename).toLowerCase();
+    if (blocklist.includes(ext)) return false;
 
-// 2. Public / Reverse Uploads (STRENGE Blacklist)
-const chunkUploadPublic = multer({ 
-    storage: chunkStorage, 
+    // 2. Double Extension Check (e.g. image.php.jpg)
+    // Alleen checken als de voorlaatste extensie in de blacklist staat
+    const parts = filename.split('.');
+    if (parts.length > 2) {
+        const secondLast = '.' + parts[parts.length - 2].toLowerCase();
+        if (blocklist.includes(secondLast)) return false;
+    }
+    return true;
+};
+
+// 1. Authenticated Uploads
+const chunkUploadAuth = multer({
+    storage: chunkStorage,
     limits: { fileSize: 500 * 1024 * 1024, files: 1 },
     fileFilter: (req, file, cb) => {
-        const dangerousTypes = [
-            '.exe', '.bat', '.cmd', '.sh', '.ps1', '.vbs', 
-            '.php', '.php3', '.php4', '.phtml', '.pl', '.py', '.cgi', 
-            '.jsp', '.asp', '.aspx', 
-            '.jar', '.msi', '.com', '.scr', '.hta', 
-            '.app', '.dmg', '.pkg'
-        ];
-        // Extra check: dubbele extensies (bijv. image.php.jpg)
-        const parts = file.originalname.split('.');
-        if (parts.length > 2) {
-             const secondLast = '.' + parts[parts.length - 2].toLowerCase();
-             if (dangerousTypes.includes(secondLast)) {
-                 return cb(new Error('Double extensions with executable types are not allowed.'));
-             }
-        }
-
-        const ext = path.extname(file.originalname).toLowerCase();
-        if (dangerousTypes.includes(ext)) {
-            cb(new Error('This file type is not allowed for security reasons.'));
-        } else {
+        getConfig().then(config => {
+            const blocklist = config.blockedExtensionsUser || [];
+            if (blocklist.length > 0 && !checkExtension(file.originalname, blocklist)) {
+                return cb(new Error('This file type is not allowed per configuration.'));
+            }
             cb(null, true);
-        }
+        }).catch(err => cb(err));
+    }
+});
+
+// 2. Public / Reverse Uploads
+const chunkUploadPublic = multer({
+    storage: chunkStorage,
+    limits: { fileSize: 500 * 1024 * 1024, files: 1 },
+    fileFilter: (req, file, cb) => {
+        getConfig().then(config => {
+            // Default fallback als config leeg zou zijn (veiligheid)
+            const defaultGuestBlock = ['.exe', '.bat', '.cmd', '.sh', '.ps1', '.vbs', '.php', '.php3', '.php4', '.phtml', '.pl', '.py', '.cgi', '.jsp', '.asp', '.aspx', '.jar', '.msi', '.com', '.scr', '.hta', '.app', '.dmg', '.pkg'];
+            const blocklist = config.blockedExtensionsGuest || defaultGuestBlock;
+
+            if (!checkExtension(file.originalname, blocklist)) {
+                return cb(new Error('This file type is not allowed for security reasons.'));
+            }
+            cb(null, true);
+        }).catch(err => cb(err));
     }
 });
 
 apiRouter.post('/shares/:id/chunk', authenticateToken, uploadLimiter, chunkUploadAuth.single('chunk'), async (req, res) => {
     const { id } = req.params;
     const { fileName, chunkIndex, fileId } = req.body;
-    
+
     if (!req.file) return res.status(400).json({ error: 'No data' });
 
     // UNIEKE NAAM: Opslaan als .part bestand om corruptie te voorkomen
@@ -2433,7 +2471,7 @@ apiRouter.post('/shares/:id/chunk', authenticateToken, uploadLimiter, chunkUploa
             const usageRes = await pool.query('SELECT COALESCE(SUM(size), 0) as total FROM files WHERE share_id = $1', [id]);
             const currentTotal = parseInt(usageRes.rows[0].total);
             if (currentTotal + req.file.size > maxBytes) {
-                await fs.unlink(req.file.path).catch(() => {});
+                await fs.unlink(req.file.path).catch(() => { });
                 return res.status(413).json({ error: `Share limit exceeded.` });
             }
         }
@@ -2443,7 +2481,7 @@ apiRouter.post('/shares/:id/chunk', authenticateToken, uploadLimiter, chunkUploa
 
         res.json({ success: true });
     } catch (e) {
-        if (req.file) await fs.unlink(req.file.path).catch(() => {});
+        if (req.file) await fs.unlink(req.file.path).catch(() => { });
         console.error('Chunk error:', e);
         res.status(500).json({ error: 'Chunk write failed' });
     }
@@ -2452,9 +2490,9 @@ apiRouter.post('/shares/:id/chunk', authenticateToken, uploadLimiter, chunkUploa
 // STAP 3: Finalize (Verplaatsen, Scannen, Database, Email)
 apiRouter.post('/shares/:id/finalize', authenticateToken, async (req, res) => {
     const { id } = req.params;
-    const { files } = req.body; 
+    const { files } = req.body;
     const authReq = req as AuthRequest;
-    
+
     const client = await pool.connect();
 
     try {
@@ -2471,7 +2509,7 @@ apiRouter.post('/shares/:id/finalize', authenticateToken, async (req, res) => {
         const mergeParts = async (fileName: string, fileId: string, totalChunks: number, finalPath: string) => {
             const { createReadStream, createWriteStream } = require('fs');
             const dest = createWriteStream(finalPath);
-            
+
             for (let i = 0; i < totalChunks; i++) {
                 const partPath = path.join(TEMP_DIR, `${id}_${fileId}_${fileName}.part_${i}`);
                 try { await fs.access(partPath); } catch { dest.end(); throw new Error(`Missing part ${i} of ${fileName}`); }
@@ -2482,7 +2520,7 @@ apiRouter.post('/shares/:id/finalize', authenticateToken, async (req, res) => {
                     source.pipe(dest, { end: false });
                     source.on('end', resolve);
                 });
-                await fs.unlink(partPath).catch(() => {}); // Opruimen
+                await fs.unlink(partPath).catch(() => { }); // Opruimen
             }
             dest.end();
             await new Promise(resolve => dest.on('finish', resolve));
@@ -2492,10 +2530,10 @@ apiRouter.post('/shares/:id/finalize', authenticateToken, async (req, res) => {
             const safeFileName = path.basename(f.fileName);
             const safeExt = path.extname(safeFileName);
             const finalPath = path.join(shareDir, crypto.randomBytes(8).toString('hex') + safeExt);
-            
+
             // Bereken chunks voor merge
             const k = 1024;
-            const sizeMap: any = { 'KB': k, 'MB': k*k, 'GB': k*k*k, 'TB': k*k*k*k };
+            const sizeMap: any = { 'KB': k, 'MB': k * k, 'GB': k * k * k, 'TB': k * k * k * k };
             const chunkSizeVal = config.chunkSizeVal || 50;
             const chunkSizeUnit = config.chunkSizeUnit || 'MB';
             const CHUNK_SIZE = chunkSizeVal * (sizeMap[chunkSizeUnit] || sizeMap['MB']);
@@ -2507,16 +2545,16 @@ apiRouter.post('/shares/:id/finalize', authenticateToken, async (req, res) => {
             if (clamscanInstance) {
                 const result = await clamscanInstance.isInfected(finalPath);
                 if (result.isInfected) {
-                    await fs.unlink(finalPath).catch(() => {});
+                    await fs.unlink(finalPath).catch(() => { });
                     throw new Error(`Virus detected in ${f.originalName}!`);
                 }
             } else if (config.clamavMustScan) {
-                await fs.unlink(finalPath).catch(() => {}); 
+                await fs.unlink(finalPath).catch(() => { });
                 throw new Error("Virus scanner unavailable, upload refused.");
             }
 
             const safeOriginalName = sanitizeFilename(f.originalName);
-            await client.query(`INSERT INTO files (share_id, filename, original_name, size, mime_type, storage_path) VALUES ($1, $2, $3, $4, $5, $6)`, 
+            await client.query(`INSERT INTO files (share_id, filename, original_name, size, mime_type, storage_path) VALUES ($1, $2, $3, $4, $5, $6)`,
                 [id, path.basename(finalPath), safeOriginalName, f.size, f.mimeType, finalPath]);
         }
 
@@ -2533,7 +2571,7 @@ apiRouter.post('/shares/:id/finalize', authenticateToken, async (req, res) => {
                 const url = `${baseUrl}/s/${id}`;
                 for (const email of list) {
                     await pool.query(`INSERT INTO contacts (user_id, email) VALUES ($1, $2) ON CONFLICT (user_id, email) DO NOTHING`, [authReq.user!.id, email]);
-                    await sendEmail(email, 'Files received', 
+                    await sendEmail(email, 'Files received',
                         `<p><strong>${escapeHtml(authReq.user!.email)}</strong> shared files with you.</p>
                         <div class="message-box" style="background: #f3f4f6; padding: 15px; border-radius: 8px; margin: 20px 0; color: #4b5563;">
                         ${share.message ? escapeHtml(share.message).replace(/\n/g, '<br>') : 'No message was added.'}
@@ -2561,53 +2599,53 @@ apiRouter.put('/shares/:id', authenticateToken, upload.array('files'), handleUpl
     try {
         const { name, expiration, password, customSlug, remove_password } = authReq.body; // remove_password toegevoegd
         const currentId = authReq.params.id;
-        
+
         // --- SCAN FILES ---
         if (authReq.files) {
             await scanFiles(authReq.files as Express.Multer.File[]);
         }
-        
+
         let newId = currentId;
         if (customSlug && customSlug !== currentId) {
             if (!isValidSlug(customSlug)) return res.status(400).json({ error: 'Invalid characters in link.' });
             const check = await client.query('SELECT id FROM shares WHERE id = $1', [customSlug]);
-            if(check.rows.length > 0) return res.status(409).json({ error: 'Link is already in use' });
+            if (check.rows.length > 0) return res.status(409).json({ error: 'Link is already in use' });
             newId = customSlug;
         }
 
-        const updates = []; 
-        let values = []; 
+        const updates = [];
+        let values = [];
         let i = 1;
 
-        if (name !== undefined) { 
-            updates.push(`name = $${i++}`); 
-            values.push(name); 
+        if (name !== undefined) {
+            updates.push(`name = $${i++}`);
+            values.push(name);
         }
 
         if (remove_password === 'true' || remove_password === true) {
             // Password verwijderen
             updates.push(`password_hash = NULL`);
-        } else if (password && password.trim() !== '') { 
+        } else if (password && password.trim() !== '') {
             // Nieuw Password instellen
-            const hash = await bcrypt.hash(password, 10); 
-            updates.push(`password_hash = $${i++}`); 
-            values.push(hash); 
+            const hash = await bcrypt.hash(password, 10);
+            updates.push(`password_hash = $${i++}`);
+            values.push(hash);
         }
 
-        if (authReq.body.expirationVal !== undefined && authReq.body.expirationVal !== null) { 
+        if (authReq.body.expirationVal !== undefined && authReq.body.expirationVal !== null) {
             let val = parseInt(authReq.body.expirationVal);
-            
+
             // BELANGRIJK: Als parseInt failed (bijv. lege string) of waarde is 0 -> Maak er 0 van.
             if (isNaN(val)) val = 0;
 
             const unit = authReq.body.expirationUnit || 'Days';
-            
+
             // Als val > 0 is, bereken datum. Als val 0 is, wordt het NULL (Nooit verlopen).
             // We gebruiken hier GEEN config fallback, want bij een edit is 0 = oneindig.
-            const date = val > 0 ? new Date(Date.now() + getTimeInMs(val, unit)) : null; 
-            
-            updates.push(`expires_at = $${i++}`); 
-            values.push(date); 
+            const date = val > 0 ? new Date(Date.now() + getTimeInMs(val, unit)) : null;
+
+            updates.push(`expires_at = $${i++}`);
+            values.push(date);
         }
 
         await client.query('BEGIN');
@@ -2633,9 +2671,9 @@ apiRouter.put('/shares/:id', authenticateToken, upload.array('files'), handleUpl
                 if (err.code !== 'ENOENT') console.error('Fout bij hernoemen map:', err);
             }
         }
-        
-        if(updates.length > 0) {
-            values.push(currentId); 
+
+        if (updates.length > 0) {
+            values.push(currentId);
             values.push(authReq.user!.id);
             // Let op: index i en i+1 gebruiken voor WHERE clause
             await client.query(`UPDATE shares SET ${updates.join(', ')} WHERE id = $${i++} AND user_id = $${i++}`, values);
@@ -2648,23 +2686,23 @@ apiRouter.put('/shares/:id', authenticateToken, upload.array('files'), handleUpl
         }
         await client.query('COMMIT');
         res.json({ success: true, newId });
-    } catch(e: any) { 
-        await client.query('ROLLBACK'); 
+    } catch (e: any) {
+        await client.query('ROLLBACK');
         if (authReq.files && Array.isArray(authReq.files)) {
             for (const f of authReq.files as Express.Multer.File[]) {
                 // We proberen elk geüpload bestand direct weer te verwijderen
-                await fs.unlink(f.path).catch(() => {}); 
+                await fs.unlink(f.path).catch(() => { });
             }
         }
-        console.error('Share update error:', e); 
+        console.error('Share update error:', e);
         // We lekken alleen de error als het een bewuste validatie/virus error is
         const isSafeError = e.message.includes('Security error') || e.message.includes('Link is already in use') || e.message.includes('Virus');
-        
+
         res.status(isSafeError ? 400 : 500).json({
             error: isSafeError ? e.message : 'An internal error occurred while updating.'
         });
-    } finally { 
-        client.release(); 
+    } finally {
+        client.release();
     }
 });
 
@@ -2720,7 +2758,7 @@ apiRouter.get('/shares/:id/download', downloadLimiter, async (req, res) => {
             'SELECT max_downloads, download_count, expires_at, password_hash FROM shares WHERE id = $1',
             [id]
         );
-        
+
         if (shareCheck.rows.length === 0) { release(); return res.status(404).send('Share not found'); }
         const share = shareCheck.rows[0];
 
@@ -2728,7 +2766,7 @@ apiRouter.get('/shares/:id/download', downloadLimiter, async (req, res) => {
         if (share.password_hash) {
             const authCookie = cookies[authCookieName];
             if (!authCookie) { release(); return res.status(403).send('Access Denied: Password required.'); }
-            
+
             try {
                 const decoded: any = jwt.verify(authCookie, JWT_SECRET);
                 if (decoded.shareId !== id) throw new Error('Mismatch');
@@ -2754,19 +2792,19 @@ apiRouter.get('/shares/:id/download', downloadLimiter, async (req, res) => {
             res.cookie(dlCookieName, '1', { httpOnly: true, sameSite: 'lax' });
         } else {
             if (share.max_downloads && share.download_count >= share.max_downloads) {
-                 // Optioneel: blokkeer als teller cookie er is maar max is bereikt
+                // Optioneel: blokkeer als teller cookie er is maar max is bereikt
             }
         }
-        
+
         // 6. ZIP Genereren
         const config = await getConfig();
         const files = (await pool.query('SELECT * FROM files WHERE share_id = $1', [id])).rows;
-        if(files.length === 0) { release(); return res.status(404).send('Empty'); }
+        if (files.length === 0) { release(); return res.status(404).send('Empty'); }
 
         const totalSize = files.reduce((acc: number, f: any) => acc + parseInt(f.size), 0);
         const useCompression = totalSize < 100 * 1024 * 1024;
 
-        const archive = archiver('zip', { 
+        const archive = archiver('zip', {
             zlib: { level: useCompression ? (config.zipLevel || 5) : 0 },
             store: !useCompression
         });
@@ -2790,7 +2828,7 @@ apiRouter.get('/shares/:id/download', downloadLimiter, async (req, res) => {
             usedNames.add(entryName);
             archive.file(f.storage_path, { name: entryName, store: shouldStore } as archiver.EntryData);
         });
-        
+
         await logAudit(null, 'download_zip', 'share', id, req, { size: totalSize });
         await archive.finalize();
 
@@ -2804,12 +2842,12 @@ apiRouter.get('/shares/:id/download', downloadLimiter, async (req, res) => {
 apiRouter.delete('/shares/:id', authenticateToken, async (req, res) => {
     const authReq = req as AuthRequest;
     const share = await pool.query('SELECT id FROM shares WHERE id = $1 AND user_id = $2', [authReq.params.id, authReq.user!.id]);
-    
-    if(share.rows.length > 0) {
+
+    if (share.rows.length > 0) {
         // EERST proberen bestanden te verwijderen
-        try { 
-            await fs.rm(path.join(UPLOAD_DIR, authReq.params.id), { recursive: true, force: true }); 
-        } catch(e: any) {
+        try {
+            await fs.rm(path.join(UPLOAD_DIR, authReq.params.id), { recursive: true, force: true });
+        } catch (e: any) {
             console.error(`⚠️ Couldn't delete files for ${authReq.params.id}:`, e.message);
             // We gaan wel door met DB verwijderen, anders blijft de share 'hangen' in de UI
         }
@@ -2828,27 +2866,27 @@ apiRouter.delete('/shares/:id/files/:fileId', authenticateToken, async (req, res
 
     // 1. Haal bestand info op
     const file = await pool.query(
-        'SELECT f.storage_path FROM files f JOIN shares s ON f.share_id = s.id WHERE f.id = $1 AND s.user_id = $2 AND s.id = $3', 
+        'SELECT f.storage_path FROM files f JOIN shares s ON f.share_id = s.id WHERE f.id = $1 AND s.user_id = $2 AND s.id = $3',
         [fileId, authReq.user!.id, id]
     );
 
     if (file.rows.length > 0) {
         // 2. Verwijder bestand uit DB en disk
         await pool.query('DELETE FROM files WHERE id = $1', [fileId]);
-        try { await fs.unlink(file.rows[0].storage_path); } catch(e) {}
+        try { await fs.unlink(file.rows[0].storage_path); } catch (e) { }
 
         const remaining = await pool.query('SELECT COUNT(*) FROM files WHERE share_id = $1', [id]);
         const count = parseInt(remaining.rows[0].count);
 
         if (count === 0) {
             // Share is leeg, ruim alles op (folder + share record)
-            try { 
-                await fs.rm(path.join(UPLOAD_DIR, id), { recursive: true, force: true }); 
-            } catch(e) {}
-            
+            try {
+                await fs.rm(path.join(UPLOAD_DIR, id), { recursive: true, force: true });
+            } catch (e) { }
+
             await pool.query('DELETE FROM shares WHERE id = $1', [id]);
             await logAudit(authReq.user!.id, 'share_deleted_empty', 'share', id, req, { reason: 'last_file_deleted' });
-            
+
             // Stuur terug dat share ook verwijderd is
             return res.json({ success: true, shareDeleted: true });
         }
@@ -2866,7 +2904,7 @@ apiRouter.post('/reverse', authenticateToken, async (req, res) => {
         const validated = reverseShareSchema.parse(authReq.body);
         // Haal de nieuwe expiration velden op
         const { name, maxSize, expirationVal, expirationUnit, password, notify, sendEmailTo, thankYouMessage, customSlug } = validated;
-        
+
         // Default naam instellen als deze leeg is
         const finalName = (name && name.trim() !== '') ? name : 'Reverse Share';
 
@@ -2874,14 +2912,14 @@ apiRouter.post('/reverse', authenticateToken, async (req, res) => {
         if (customSlug && customSlug.trim() !== '') {
             id = customSlug.trim();
             if (!isValidSlug(id)) return res.status(400).json({ error: 'Link may only contain letters, numbers and hyphens.' });
-            
+
             // Check of ID al bestaat in reverse_shares
             const check = await pool.query('SELECT id FROM reverse_shares WHERE id = $1', [id]);
             if (check.rows.length > 0) return res.status(409).json({ error: 'This Link is already in use.' });
         } else {
             id = await generateSecureId();
         }
-        
+
         // Bereken expiresAt met de helper functie (net zoals bij normale shares)
         let expiresAt = null;
         if (expirationVal && expirationVal > 0) {
@@ -2889,10 +2927,10 @@ apiRouter.post('/reverse', authenticateToken, async (req, res) => {
         }
 
         const passHash = password ? await bcrypt.hash(password, 10) : null;
-        
+
         // Voeg thank_you_message toe aan insert
         await pool.query(
-            `INSERT INTO reverse_shares (id, user_id, name, max_size, expires_at, password_hash, notify_email, thank_you_message) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, 
+            `INSERT INTO reverse_shares (id, user_id, name, max_size, expires_at, password_hash, notify_email, thank_you_message) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
             [id, authReq.user!.id, finalName, maxSize, expiresAt, passHash, notify, thankYouMessage || null]
         );
         const config = await getConfig();
@@ -2924,20 +2962,20 @@ apiRouter.delete('/reverse/:id', authenticateToken, async (req, res) => {
 apiRouter.get('/reverse/:id/files', authenticateToken, async (req, res) => {
     const authReq = req as AuthRequest;
     const check = await pool.query('SELECT id FROM reverse_shares WHERE id = $1 AND user_id = $2', [authReq.params.id, authReq.user!.id]);
-    if(check.rows.length === 0) return res.status(403).json({ error: 'Access denied' });
+    if (check.rows.length === 0) return res.status(403).json({ error: 'Access denied' });
     const files = await pool.query('SELECT * FROM files WHERE reverse_share_id = $1 ORDER BY created_at DESC', [authReq.params.id]);
     res.json(files.rows);
 });
 
 apiRouter.get('/reverse/files/:fileId/download', authenticateToken, async (req, res) => {
     const authReq = req as AuthRequest;
-    
+
     // Check of de file bestaat EN of de huidige user eigenaar is van de reverse share
     const result = await pool.query(
         `SELECT f.storage_path, f.original_name 
          FROM files f 
          JOIN reverse_shares r ON f.reverse_share_id = r.id 
-         WHERE f.id = $1 AND r.user_id = $2`, 
+         WHERE f.id = $1 AND r.user_id = $2`,
         [req.params.fileId, authReq.user!.id]
     );
 
@@ -2965,33 +3003,33 @@ apiRouter.get('/reverse/:id/download', authenticateToken, async (req, res) => {
 
     try {
         const authReq = req as AuthRequest;
-        
+
         // Check eigenaarschap
-    const shareCheck = await pool.query(
-        'SELECT id FROM reverse_shares WHERE id = $1 AND user_id = $2',
-        [req.params.id, authReq.user!.id]
-    );
-    if (shareCheck.rows.length === 0) return res.status(403).send('Access denied');
+        const shareCheck = await pool.query(
+            'SELECT id FROM reverse_shares WHERE id = $1 AND user_id = $2',
+            [req.params.id, authReq.user!.id]
+        );
+        if (shareCheck.rows.length === 0) return res.status(403).send('Access denied');
 
-    const files = await pool.query('SELECT * FROM files WHERE reverse_share_id = $1', [req.params.id]);
-    if(files.rows.length === 0) return res.status(404).send('No files');
+        const files = await pool.query('SELECT * FROM files WHERE reverse_share_id = $1', [req.params.id]);
+        if (files.rows.length === 0) return res.status(404).send('No files');
 
-    // ZIP maken
-    const config = await getConfig();
-    const archive = archiver('zip', { zlib: { level: config.zipLevel || 5 } });
+        // ZIP maken
+        const config = await getConfig();
+        const archive = archiver('zip', { zlib: { level: config.zipLevel || 5 } });
 
-    res.attachment(`reverse_share_${req.params.id}.zip`);
-    archive.pipe(res);
+        res.attachment(`reverse_share_${req.params.id}.zip`);
+        archive.pipe(res);
 
-    for (const f of files.rows) {
+        for (const f of files.rows) {
             archive.file(f.storage_path, { name: f.original_name });
         }
-        
+
         // Audit log voor eigenaar download
         await logAudit(authReq.user!.id, 'reverse_download_zip', 'reverse_share', req.params.id, req);
-        
+
         await archive.finalize();
-        
+
     } catch (e: any) {
         zipQueue.release();
         console.error('Reverse download error:', e);
@@ -3005,9 +3043,9 @@ const publicLimiter = createRateLimiter(60 * 1000, 100, "Too many requests");
 apiRouter.get('/public/shares/:id', publicLimiter, async (req, res) => {
     // 1. Haal ook max_downloads en download_count op
     const share = await pool.query('SELECT name, password_hash, expires_at, message, max_downloads, download_count FROM shares WHERE id = $1', [req.params.id]);
-    
+
     if (share.rows.length === 0) return res.status(404).json({ error: 'Not found' });
-    
+
     const s = share.rows[0];
 
     // 2. Check Expiratie
@@ -3019,18 +3057,19 @@ apiRouter.get('/public/shares/:id', publicLimiter, async (req, res) => {
     }
 
     const isProtected = !!s.password_hash;
+    const config = await getConfig();
     const files = isProtected ? [] : (await pool.query('SELECT id, original_name, size, mime_type FROM files WHERE share_id = $1', [req.params.id])).rows;
-    res.json({ name: s.name, message: s.message, protected: isProtected, files });
+    res.json({ name: s.name, message: s.message, protected: isProtected, files, appName: config.appName });
 });
 
 apiRouter.post('/shares/:id/verify', loginLimiter, async (req, res) => {
     const { id } = req.params;
     const result = await pool.query('SELECT password_hash FROM shares WHERE id = $1', [id]);
-    
+
     if (result.rows.length === 0) return res.status(404).json({ error: 'Not found' });
-    
+
     const valid = await bcrypt.compare(req.body.password, result.rows[0].password_hash);
-    
+
     if (valid) {
         // Maak een token aan dat bewijst dat dit IP/User het wachtwoord kent voor DEZE share
         const accessPayload = { shareId: id, authorized: true };
@@ -3041,9 +3080,9 @@ apiRouter.post('/shares/:id/verify', loginLimiter, async (req, res) => {
         const forceSecure = config.secureCookies || (config.appUrl && config.appUrl.startsWith('https://'));
 
         // Zet een HTTP-Only cookie die specifiek is voor deze share
-        res.cookie(`share_auth_${id}`, accessToken, { 
-            httpOnly: true, 
-            secure: isProduction ? forceSecure : false, 
+        res.cookie(`share_auth_${id}`, accessToken, {
+            httpOnly: true,
+            secure: isProduction ? forceSecure : false,
             sameSite: 'lax', // Lax is nodig zodat de cookie wordt meegestuurd bij normale link-navigatie (downloaden)
             maxAge: 3600000 // 1 uur
         });
@@ -3057,7 +3096,7 @@ apiRouter.post('/shares/:id/verify', loginLimiter, async (req, res) => {
 
 apiRouter.get('/shares/:id/files/:fileId', downloadLimiter, async (req, res) => {
     const { id, fileId } = req.params;
-    const cookieName = `dl_${id}`; 
+    const cookieName = `dl_${id}`;
     const authCookieName = `share_auth_${id}`; // De beveiligingscookie
     const cookies = parseCookies(req);
     const hasDownloaded = cookies[cookieName];
@@ -3065,12 +3104,12 @@ apiRouter.get('/shares/:id/files/:fileId', downloadLimiter, async (req, res) => 
     // 0. Eerst share info ophalen om wachtwoord status te checken
     const shareInfo = await pool.query('SELECT password_hash FROM shares WHERE id = $1', [id]);
     if (shareInfo.rows.length === 0) return res.status(404).send('Share not found');
-    
+
     // BEVEILIGINGS CHECK: Als er een wachtwoord op zit, check het cookie
     if (shareInfo.rows[0].password_hash) {
         const authCookie = cookies[authCookieName];
         if (!authCookie) return res.status(403).send('Access Denied: Password required.');
-        
+
         try {
             const decoded: any = jwt.verify(authCookie, JWT_SECRET);
             if (decoded.shareId !== id) throw new Error('Mismatch');
@@ -3081,10 +3120,10 @@ apiRouter.get('/shares/:id/files/:fileId', downloadLimiter, async (req, res) => 
 
     // Stap 1: Metadata checken (nu we weten dat toegang mag)
     const check = await pool.query(
-        'SELECT s.max_downloads, s.download_count, s.expires_at, f.storage_path, f.original_name FROM files f JOIN shares s ON f.share_id = s.id WHERE s.id = $1 AND f.id = $2', 
+        'SELECT s.max_downloads, s.download_count, s.expires_at, f.storage_path, f.original_name FROM files f JOIN shares s ON f.share_id = s.id WHERE s.id = $1 AND f.id = $2',
         [id, fileId]
     );
-    
+
     if (check.rows.length === 0) return res.status(404).send('Not found');
     const data = check.rows[0];
 
@@ -3105,7 +3144,7 @@ apiRouter.get('/shares/:id/files/:fileId', downloadLimiter, async (req, res) => 
         if (updateRes.rowCount === 0) {
             return res.status(410).end();
         }
-        
+
         // Cookie zetten
         res.cookie(cookieName, '1', { httpOnly: true, sameSite: 'lax' });
     }
@@ -3121,23 +3160,25 @@ apiRouter.get('/public/reverse/:id', async (req, res) => {
     if (result.rows.length === 0) return res.status(404).json({ error: 'Not found' });
     const share = result.rows[0];
     if (share.expires_at && new Date() > new Date(share.expires_at)) return res.status(410).json({ error: 'Expired' });
-    
-    res.json({ 
-        name: share.name, 
-        maxSize: share.max_size, 
+
+    const config = await getConfig();
+    res.json({
+        name: share.name,
+        maxSize: share.max_size,
         protected: !!share.password_hash,
-        thankYouMessage: share.thank_you_message
+        thankYouMessage: share.thank_you_message,
+        appName: config.appName
     });
 });
 
 apiRouter.post('/public/reverse/:id/verify', loginLimiter, async (req, res) => {
     const { id } = req.params;
     const result = await pool.query('SELECT password_hash FROM reverse_shares WHERE id = $1', [id]);
-    
+
     if (result.rows.length === 0) return res.status(404).json({ error: 'Not found' });
-    
+
     const valid = await bcrypt.compare(req.body.password, result.rows[0].password_hash);
-    
+
     if (valid) {
         // --- BEVEILIGING START ---
         const token = jwt.sign({ shareId: id, scope: 'upload' }, JWT_SECRET, { expiresIn: '1h' });
@@ -3145,14 +3186,14 @@ apiRouter.post('/public/reverse/:id/verify', loginLimiter, async (req, res) => {
         const isProduction = process.env.NODE_ENV === 'production';
         const forceSecure = config.secureCookies || (config.appUrl && config.appUrl.startsWith('https://'));
 
-        res.cookie(`rev_auth_${id}`, token, { 
-            httpOnly: true, 
-            secure: isProduction ? forceSecure : false, 
-            sameSite: 'strict', 
-            maxAge: 3600000 
+        res.cookie(`rev_auth_${id}`, token, {
+            httpOnly: true,
+            secure: isProduction ? forceSecure : false,
+            sameSite: 'strict',
+            maxAge: 3600000
         });
         // --- BEVEILIGING EIND ---
-        
+
         res.json({ valid: true });
     } else {
         res.json({ valid: false });
@@ -3166,7 +3207,7 @@ apiRouter.post('/public/reverse/:id/init', checkUploadLimits, uploadLimiter, asy
     const { id } = req.params;
     const shareRes = await pool.query('SELECT * FROM reverse_shares WHERE id = $1', [id]);
     if (shareRes.rows.length === 0) return res.status(404).json({ error: 'Link not found' });
-    
+
     const share = shareRes.rows[0];
     if (share.expires_at && new Date() > new Date(share.expires_at)) {
         return res.status(410).json({ error: 'Link has expired' });
@@ -3210,7 +3251,7 @@ apiRouter.post('/public/reverse/:id/chunk', checkUploadLimits, uploadLimiter, ch
         );
 
         if (shareCheck.rows.length === 0) {
-            await fs.unlink(req.file.path).catch(() => {});
+            await fs.unlink(req.file.path).catch(() => { });
             return res.status(404).json({ error: 'Link not found' });
         }
 
@@ -3220,15 +3261,15 @@ apiRouter.post('/public/reverse/:id/chunk', checkUploadLimits, uploadLimiter, ch
             const cookies = parseCookies(req);
             const token = cookies[`rev_auth_${id}`];
             if (!token) {
-                await fs.unlink(req.file.path).catch(() => {});
+                await fs.unlink(req.file.path).catch(() => { });
                 return res.status(403).json({ error: 'Password required' });
             }
             try {
                 const decoded: any = jwt.verify(token, JWT_SECRET);
                 if (decoded.shareId !== id) throw new Error();
-            } catch { 
-                await fs.unlink(req.file.path).catch(() => {});
-                return res.status(403).json({ error: 'Session invalid' }); 
+            } catch {
+                await fs.unlink(req.file.path).catch(() => { });
+                return res.status(403).json({ error: 'Session invalid' });
             }
         }
 
@@ -3238,10 +3279,10 @@ apiRouter.post('/public/reverse/:id/chunk', checkUploadLimits, uploadLimiter, ch
 
         // Bij de EERSTE chunk checken we of het totale bestand nog past
         if (parseInt(chunkIndex) === 0) {
-             if (maxSize > 0 && currentDbUsage >= maxSize) {
-                await fs.unlink(req.file.path).catch(() => {});
+            if (maxSize > 0 && currentDbUsage >= maxSize) {
+                await fs.unlink(req.file.path).catch(() => { });
                 return res.status(413).json({ error: `Share limit exceeded.` });
-             }
+            }
         }
 
         // 3. Verplaats de chunk naar zijn eigen .part bestand
@@ -3249,7 +3290,7 @@ apiRouter.post('/public/reverse/:id/chunk', checkUploadLimits, uploadLimiter, ch
 
         res.json({ success: true });
     } catch (e: any) {
-        if (req.file) await fs.unlink(req.file.path).catch(() => {});
+        if (req.file) await fs.unlink(req.file.path).catch(() => { });
         console.error('Guest Chunk error:', e);
         res.status(500).json({ error: 'Chunk write failed' });
     }
@@ -3260,13 +3301,13 @@ apiRouter.post('/public/reverse/:id/chunk', checkUploadLimits, uploadLimiter, ch
 apiRouter.post('/public/reverse/:id/finalize', async (req, res) => {
     const { id } = req.params;
     const { files } = req.body;
-    
+
     const client = await pool.connect();
 
     try {
         const config = await getConfig();
         const totalUploadSize = files.reduce((acc: number, f: any) => acc + f.size, 0);
-        
+
         // 1. Check share en limieten
         const shareRes = await client.query(`
             SELECT r.*, COALESCE(SUM(f.size), 0) as current_used 
@@ -3299,7 +3340,7 @@ apiRouter.post('/public/reverse/:id/finalize', async (req, res) => {
         const mergeParts = async (fileName: string, fileId: string, totalChunks: number, finalPath: string) => {
             const { createReadStream, createWriteStream } = require('fs');
             const dest = createWriteStream(finalPath);
-            
+
             for (let i = 0; i < totalChunks; i++) {
                 const partPath = path.join(TEMP_DIR, `rev_${id}_${fileId}_${fileName}.part_${i}`);
                 try {
@@ -3314,7 +3355,7 @@ apiRouter.post('/public/reverse/:id/finalize', async (req, res) => {
                     source.pipe(dest, { end: false });
                     source.on('end', resolve);
                 });
-                await fs.unlink(partPath).catch(() => {}); // Opruimen
+                await fs.unlink(partPath).catch(() => { }); // Opruimen
             }
             dest.end();
             await new Promise(resolve => dest.on('finish', resolve));
@@ -3324,7 +3365,7 @@ apiRouter.post('/public/reverse/:id/finalize', async (req, res) => {
         for (const f of files) {
             // Bereken chunks
             const k = 1024;
-            const sizeMap: any = { 'KB': k, 'MB': k*k, 'GB': k*k*k, 'TB': k*k*k*k };
+            const sizeMap: any = { 'KB': k, 'MB': k * k, 'GB': k * k * k, 'TB': k * k * k * k };
             const chunkSizeVal = config.chunkSizeVal || 50;
             const chunkSizeUnit = config.chunkSizeUnit || 'MB';
             const CHUNK_SIZE = chunkSizeVal * (sizeMap[chunkSizeUnit] || sizeMap['MB']);
@@ -3334,7 +3375,7 @@ apiRouter.post('/public/reverse/:id/finalize', async (req, res) => {
             const safeOriginalName = sanitizeFilename(f.originalName);
             const uniqueName = crypto.randomBytes(8).toString('hex') + path.extname(f.fileName);
             const GUEST_DIR = path.join(UPLOAD_DIR, 'guest_uploads');
-            await fs.mkdir(GUEST_DIR, { recursive: true }); 
+            await fs.mkdir(GUEST_DIR, { recursive: true });
             const finalPath = path.join(GUEST_DIR, uniqueName);
 
             // Voeg samen
@@ -3344,23 +3385,23 @@ apiRouter.post('/public/reverse/:id/finalize', async (req, res) => {
             if (clamscanInstance) {
                 const result = await clamscanInstance.isInfected(finalPath);
                 if (result.isInfected) {
-                    await fs.unlink(finalPath).catch(() => {});
+                    await fs.unlink(finalPath).catch(() => { });
                     throw new Error(`Virus in ${f.originalName}!`);
                 }
             } else if (config.clamavMustScan) {
-                await fs.unlink(finalPath).catch(() => {});
+                await fs.unlink(finalPath).catch(() => { });
                 throw new Error("Security error: Virus scanner is unavailable.");
             }
 
             const dangerousTypes = ['.exe', '.bat', '.cmd', '.sh', '.php', '.pl', '.py', '.cgi', '.jar', '.msi', '.com', '.scr', '.hta'];
             if (dangerousTypes.includes(path.extname(safeOriginalName).toLowerCase())) {
-                 await fs.unlink(finalPath).catch(() => {});
-                 throw new Error(`Security violation: File type not allowed.`);
+                await fs.unlink(finalPath).catch(() => { });
+                throw new Error(`Security violation: File type not allowed.`);
             }
 
             // Database insert
             await client.query(
-                `INSERT INTO files (reverse_share_id, filename, original_name, size, mime_type, storage_path) VALUES ($1, $2, $3, $4, $5, $6)`, 
+                `INSERT INTO files (reverse_share_id, filename, original_name, size, mime_type, storage_path) VALUES ($1, $2, $3, $4, $5, $6)`,
                 [id, uniqueName, safeOriginalName, f.size, f.mimeType, finalPath]
             );
         }
@@ -3373,11 +3414,11 @@ apiRouter.post('/public/reverse/:id/finalize', async (req, res) => {
                 const creator = await pool.query('SELECT email FROM users WHERE id = $1', [share.user_id]);
                 if (creator.rows.length > 0) {
                     const baseUrl = getBaseUrl(config, req);
-                    await sendEmail(creator.rows[0].email, `New Upload in "${share.name}"`, 
-                        `<p>There are ${files.length} new files uploaded via your public link.</p>`, 
+                    await sendEmail(creator.rows[0].email, `New Upload in "${share.name}"`,
+                        `<p>There are ${files.length} new files uploaded via your public link.</p>`,
                         `${baseUrl}/reverse`, 'View Dashboard');
                 }
-            } catch (mailErr) {}
+            } catch (mailErr) { }
         }
 
         res.json({ success: true });
@@ -3398,9 +3439,9 @@ async function runCLI() {
     if (args.length === 0) return;
     const command = args[0]; const params = args.slice(1);
     console.log('--- Nexo Share CLI v2.0 ---');
-    
+
     try {
-        if(command==='help'){ 
+        if (command === 'help') {
             console.log('\nUser Management:');
             console.log('  list-users                               - Show all users');
             console.log('  create-user <email> <name> <pass> <adm?> - Create new user (adm?=true/false)');
@@ -3408,7 +3449,7 @@ async function runCLI() {
             console.log('  reset-password <email> <newpass>         - Force reset password');
             console.log('  delete-user <email>                      - Delete user and their data');
             console.log('  2fa-disable <email>                      - Emergency disable 2FA for user');
-            
+
             console.log('\nConfiguration (General):');
             console.log('  config-list                              - Show all current settings');
             console.log('  config-get <key>                         - Show single value');
@@ -3425,120 +3466,120 @@ async function runCLI() {
             console.log('  cleanup                                  - Run manual garbage collection');
             console.log('  system-info                              - Show server environment info');
         }
-        
+
         // --- USER COMMANDS ---
-        else if(command==='list-users'){ const r=await pool.query('SELECT id, email, name, is_admin, totp_enabled FROM users'); console.table(r.rows); }
-        else if(command==='create-user'){ 
-            if(params.length < 4) { console.log('Usage: create-user <email> <name> <pass> <is_admin>'); return; }
-            await pool.query('INSERT INTO users (email, name, password_hash, is_admin) VALUES ($1, $2, $3, $4)', [params[0], params[1], await bcrypt.hash(params[2], 10), params[3]==='true']); 
-            console.log(`User ${params[0]} created.`); 
+        else if (command === 'list-users') { const r = await pool.query('SELECT id, email, name, is_admin, totp_enabled FROM users'); console.table(r.rows); }
+        else if (command === 'create-user') {
+            if (params.length < 4) { console.log('Usage: create-user <email> <name> <pass> <is_admin>'); return; }
+            await pool.query('INSERT INTO users (email, name, password_hash, is_admin) VALUES ($1, $2, $3, $4)', [params[0], params[1], await bcrypt.hash(params[2], 10), params[3] === 'true']);
+            console.log(`User ${params[0]} created.`);
         }
-        else if(command==='set-admin'){ await pool.query('UPDATE users SET is_admin=$1 WHERE email=$2', [params[1]==='true', params[0]]); console.log(`Admin status for ${params[0]} set to ${params[1]}`); }
-        else if(command==='reset-password'){ await pool.query('UPDATE users SET password_hash=$1 WHERE email=$2', [await bcrypt.hash(params[1], 10), params[0]]); console.log(`Password reset for ${params[0]}`); }
-        else if(command==='delete-user'){ await pool.query('DELETE FROM users WHERE email=$1', [params[0]]); console.log(`User ${params[0]} deleted.`); }
-        else if(command==='2fa-disable'){ 
-            const r=await pool.query('SELECT id FROM users WHERE email=$1',[params[0]]);
-            if(r.rows.length===0)console.log('User not found'); 
-            else{await pool.query('UPDATE users SET totp_secret=NULL,totp_enabled=FALSE,backup_codes=NULL WHERE id=$1',[r.rows[0].id]);console.log(`2FA disabled for ${params[0]}`);}
+        else if (command === 'set-admin') { await pool.query('UPDATE users SET is_admin=$1 WHERE email=$2', [params[1] === 'true', params[0]]); console.log(`Admin status for ${params[0]} set to ${params[1]}`); }
+        else if (command === 'reset-password') { await pool.query('UPDATE users SET password_hash=$1 WHERE email=$2', [await bcrypt.hash(params[1], 10), params[0]]); console.log(`Password reset for ${params[0]}`); }
+        else if (command === 'delete-user') { await pool.query('DELETE FROM users WHERE email=$1', [params[0]]); console.log(`User ${params[0]} deleted.`); }
+        else if (command === '2fa-disable') {
+            const r = await pool.query('SELECT id FROM users WHERE email=$1', [params[0]]);
+            if (r.rows.length === 0) console.log('User not found');
+            else { await pool.query('UPDATE users SET totp_secret=NULL,totp_enabled=FALSE,backup_codes=NULL WHERE id=$1', [r.rows[0].id]); console.log(`2FA disabled for ${params[0]}`); }
         }
 
         // --- CONFIG COMMANDS ---
-        else if(command==='config-list'){ 
-            const r=await pool.query('SELECT data, setup_completed FROM config WHERE id=1');
+        else if (command === 'config-list') {
+            const r = await pool.query('SELECT data, setup_completed FROM config WHERE id=1');
             const c = r.rows[0]?.data || {};
             // Mask secrets
-            if(c.smtpPass) c.smtpPass = '********';
-            if(c.oidcSecret) c.oidcSecret = '********';
+            if (c.smtpPass) c.smtpPass = '********';
+            if (c.oidcSecret) c.oidcSecret = '********';
             console.log('Setup Completed:', r.rows[0]?.setup_completed);
-            console.table(Object.entries(c).map(([k,v]) => ({ Key: k, Value: String(v).substring(0, 50) })));
+            console.table(Object.entries(c).map(([k, v]) => ({ Key: k, Value: String(v).substring(0, 50) })));
         }
-        else if(command==='config-get'){ 
-            const r=await pool.query('SELECT data FROM config WHERE id=1');
+        else if (command === 'config-get') {
+            const r = await pool.query('SELECT data FROM config WHERE id=1');
             console.log(r.rows[0]?.data?.[params[0]] ?? 'Not set');
         }
-        else if(command==='config-set'){ 
-            if(params.length < 2) { console.log('Usage: config-set <key> <value>'); return; }
-            const r=await pool.query('SELECT data FROM config WHERE id=1');
-            const c=r.rows[0]?.data||{};
-            let v:any=params[1];
-            
+        else if (command === 'config-set') {
+            if (params.length < 2) { console.log('Usage: config-set <key> <value>'); return; }
+            const r = await pool.query('SELECT data FROM config WHERE id=1');
+            const c = r.rows[0]?.data || {};
+            let v: any = params[1];
+
             // Smart Type Detection
-            if(v==='true') v=true;
-            else if(v==='false') v=false;
+            if (v === 'true') v = true;
+            else if (v === 'false') v = false;
             // Alleen naar nummer converteren als het geen wachtwoord/secret/host is
-            else if(!isNaN(Number(v)) && !['smtpPass', 'oidcSecret', 'smtpUser', 'smtpHost', 'appName'].includes(params[0])) {
+            else if (!isNaN(Number(v)) && !['smtpPass', 'oidcSecret', 'smtpUser', 'smtpHost', 'appName'].includes(params[0])) {
                 v = Number(v);
             }
-            
-            c[params[0]]=v;
-            await pool.query('UPDATE config SET data=$1 WHERE id=1',[c]);
+
+            c[params[0]] = v;
+            await pool.query('UPDATE config SET data=$1 WHERE id=1', [c]);
             console.log(`Set ${params[0]} = ${v} [Type: ${typeof v}]`);
         }
-        else if(command==='config-unset'){ 
-            const r=await pool.query('SELECT data FROM config WHERE id=1');
-            const c=r.rows[0]?.data||{};
-            if(c[params[0]] !== undefined) {
+        else if (command === 'config-unset') {
+            const r = await pool.query('SELECT data FROM config WHERE id=1');
+            const c = r.rows[0]?.data || {};
+            if (c[params[0]] !== undefined) {
                 delete c[params[0]];
-                await pool.query('UPDATE config SET data=$1 WHERE id=1',[c]);
+                await pool.query('UPDATE config SET data=$1 WHERE id=1', [c]);
                 console.log(`Key '${params[0]}' removed (reset to default).`);
             } else {
                 console.log('Key not found.');
             }
         }
-        else if(command==='setup-reset'){
+        else if (command === 'setup-reset') {
             await pool.query('UPDATE config SET setup_completed = FALSE WHERE id=1');
             console.log('✅ Setup wizard re-enabled. Reload the page to see the wizard.');
         }
 
         // --- BULK HELPERS ---
-        else if(command==='config-smtp'){
-            if(params.length < 5) { console.log('Usage: config-smtp <host> <port> <user> <pass> <from> [secure=true]'); return; }
-            const r=await pool.query('SELECT data FROM config WHERE id=1');
-            const c=r.rows[0]?.data||{};
+        else if (command === 'config-smtp') {
+            if (params.length < 5) { console.log('Usage: config-smtp <host> <port> <user> <pass> <from> [secure=true]'); return; }
+            const r = await pool.query('SELECT data FROM config WHERE id=1');
+            const c = r.rows[0]?.data || {};
             c.smtpHost = params[0];
             c.smtpPort = parseInt(params[1]);
             c.smtpUser = params[2];
             c.smtpPass = params[3];
             c.smtpFrom = params[4];
             c.smtpSecure = params[5] === 'true';
-            await pool.query('UPDATE config SET data=$1 WHERE id=1',[c]);
+            await pool.query('UPDATE config SET data=$1 WHERE id=1', [c]);
             console.log('✅ SMTP configuration updated.');
         }
-        else if(command==='config-sso'){
-            if(params.length < 3) { console.log('Usage: config-sso <issuer_url> <client_id> <client_secret>'); return; }
-            const r=await pool.query('SELECT data FROM config WHERE id=1');
-            const c=r.rows[0]?.data||{};
+        else if (command === 'config-sso') {
+            if (params.length < 3) { console.log('Usage: config-sso <issuer_url> <client_id> <client_secret>'); return; }
+            const r = await pool.query('SELECT data FROM config WHERE id=1');
+            const c = r.rows[0]?.data || {};
             c.ssoEnabled = true;
             c.oidcIssuer = params[0];
             c.oidcClientId = params[1];
             c.oidcSecret = params[2];
-            await pool.query('UPDATE config SET data=$1 WHERE id=1',[c]);
+            await pool.query('UPDATE config SET data=$1 WHERE id=1', [c]);
             console.log('✅ SSO configuration updated & enabled.');
         }
-        else if(command==='security-toggle'){
+        else if (command === 'security-toggle') {
             const feature = params[0];
             const enabled = params[1] === 'true';
-            const r=await pool.query('SELECT data FROM config WHERE id=1');
-            const c=r.rows[0]?.data||{};
-            
-            if(feature === '2fa') c.require2FA = enabled;
-            else if(feature === 'passkeys') c.allowPasskeys = enabled;
-            else if(feature === 'reset') c.allowPasswordReset = enabled;
+            const r = await pool.query('SELECT data FROM config WHERE id=1');
+            const c = r.rows[0]?.data || {};
+
+            if (feature === '2fa') c.require2FA = enabled;
+            else if (feature === 'passkeys') c.allowPasskeys = enabled;
+            else if (feature === 'reset') c.allowPasswordReset = enabled;
             else { console.log('Unknown feature. Use: 2fa, passkeys, or reset'); return; }
 
-            await pool.query('UPDATE config SET data=$1 WHERE id=1',[c]);
+            await pool.query('UPDATE config SET data=$1 WHERE id=1', [c]);
             console.log(`Security feature '${feature}' set to ${enabled}`);
         }
 
         // --- SYSTEM ---
-        else if(command==='cleanup'){
+        else if (command === 'cleanup') {
             console.log('🧹 Starting manual cleanup...');
             await cleanupOrphanedFolders();
             await cleanupOrphanedGuestFiles();
             await cleanupOrphanedShareFiles();
             console.log('✅ Manual cleanup finished.');
         }
-        else if(command==='system-info'){
+        else if (command === 'system-info') {
             const config = await getConfig();
             console.log('\n--- System Info ---');
             console.log(`App Name:      ${config.appName}`);
@@ -3551,10 +3592,10 @@ async function runCLI() {
         }
         else console.log('Unknown command. Type "help" for a list of commands.');
 
-    } catch(e:any){
+    } catch (e: any) {
         console.error('CLI Error:', e.message);
-    } finally{
-        await pool.end(); 
+    } finally {
+        await pool.end();
         process.exit(0);
     }
 }
@@ -3688,11 +3729,11 @@ async function initDB() {
             }
 
             // STAP 2: Server Starten
-            if (process.argv.length > 2) { 
-                await runCLI(); 
+            if (process.argv.length > 2) {
+                await runCLI();
             } else {
                 if (JWT_SECRET === 'dev-secret-change-me') console.error('⚠️ DEFAULT SECRET IN USE');
-                
+
                 app.use('/api', apiRouter);
                 // XSS Preventie op user uploads (SVG scripts blokkeren)
                 app.use('/api/uploads/system', (req, res, next) => {
@@ -3717,12 +3758,12 @@ async function initDB() {
                         res.status(500).send('Server Error');
                     }
                 });
-                
+
                 app.listen(PORT, () => console.log(`🚀 API on ${PORT}`));
             }
             return; // Succesvolle start, verlaat de retry loop
 
-        } catch (e:any) {
+        } catch (e: any) {
             console.error(`⚠️ Startup failed: ${e.message}`);
             retries -= 1;
             if (retries === 0) { console.error('❌ Exiting after multiple retries.'); process.exit(1); }
