@@ -82,7 +82,7 @@ Unlike many standard open-source solutions, Nexo Share focuses heavily on securi
 ## Key Features
 
 * **🔒 Secure Sharing** — Password-protected shares with automatic expiration.
-* **📂 Chunked Uploads** — Reliably upload very large files (limited only by server storage).
+* **📂 Chunked Uploads** — Reliably upload very large files and folders (limited only by server storage).
 * **🔄 Reverse Shares** — Public drop-off links that allow guests to securely upload files to you.
 * **🛡️ Advanced Security**
   * Two-Factor Authentication (TOTP)
@@ -126,13 +126,13 @@ services:
       DB_PASSWORD: CHANGE_THIS_PASSWORD
       JWT_SECRET: CHANGE_THIS_SECRET
       UPLOAD_DIR: /app/backend/uploads
+      APP_URL: http://localhost:3000
       ALLOWED_ORIGINS: http://localhost:3000
       NODE_ENV: production
       TZ: UTC
       APP_LOCALE: en-GB
       CLAMAV_HOST: clamav
       CLAMAV_PORT: 3310
-      # RP_ID: yourdomain.com # Required for Passkeys (no protocol or port)
     volumes:
       - ./uploads:/app/backend/uploads
     depends_on:
