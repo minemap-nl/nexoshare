@@ -385,7 +385,7 @@ app.set('trust proxy', 1);
 
 // CORS Configuration
 // We staan standaard de APP_URL toe, plus localhost voor dev.
-const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || 'http://localhost:3000').split(',').map(o => o.trim());
+const ALLOWED_ORIGINS = [APP_URL, ...(process.env.ALLOWED_ORIGINS || '').split(',')].map(o => o.trim()).filter(Boolean);
 
 app.use(cors({
     origin: (origin, callback) => {

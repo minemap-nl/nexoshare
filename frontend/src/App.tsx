@@ -1116,6 +1116,43 @@ const synthesizeDirectoryItems = (items: UploadItem[]): UploadItem[] => {
     return [...foldersToAdd.values(), ...items];
 };
 
+const FileTreeList = ({ files, onDelete, readOnly = false, onDownload }: { files: UploadItem[], onDelete?: (item: UploadItem) => void, readOnly?: boolean, onDownload?: (item: UploadItem) => void }) => {
+    return (
+        <div className="bg-black/20 border border-neutral-700/50 rounded-lg max-h-64 overflow-y-auto p-1">
+            {files.length === 0 && <div className="p-4 text-center text-neutral-500 text-sm">No files</div>}
+            {files.map(item => {
+                const segments = item.path.split('/');
+                const depth = Math.max(0, segments.length - 1);
+                const indent = depth * 20;
+
+                return (
+                    <div key={item.id} className={`flex justify-between items-center p-2 border-b border-neutral-800/50 last:border-0 hover:bg-neutral-800/50 rounded text-sm ${item.isDirectory ? 'bg-neutral-800/20' : ''}`}>
+                        <div className="flex items-center gap-2 overflow-hidden flex-1 min-w-0" style={{ paddingLeft: `${indent}px` }}>
+                            <div className="flex-shrink-0 w-5 flex justify-center">
+                                {item.isDirectory ? <Folder className="w-4 h-4 text-purple-400" /> : <File className="w-4 h-4 text-neutral-500" />}
+                            </div>
+                            <span className={`truncate ${item.isDirectory ? 'text-purple-300 font-bold' : 'text-neutral-300'}`}>{item.name}</span>
+                        </div>
+
+                        <div className="flex items-center gap-3 pl-2">
+                            {!item.isDirectory && <span className="text-neutral-500 text-xs font-mono">{formatBytes(item.size)}</span>}
+
+                            {!readOnly && onDelete && (
+                                <button onClick={(e) => { e.stopPropagation(); onDelete(item) }} className="text-neutral-500 hover:text-red-400 transition ml-1"><X className="w-4 h-4" /></button>
+                            )}
+
+                            {onDownload && !item.isDirectory && (
+                                <button onClick={() => onDownload(item)} className="text-purple-400 hover:text-white transition ml-1"><Download className="w-4 h-4" /></button>
+                            )}
+                        </div>
+                    </div>
+                );
+            })}
+        </div>
+    )
+}
+
+
 const UploadView = () => {
     const [files, setFiles] = useState<UploadItem[]>([]);
     const [uploading, setUploading] = useState(false);
@@ -1684,7 +1721,7 @@ const MySharesView = () => {
         });
     };
 
-    const deleteFile = async (shareId: string, fileId: number) => {
+    const deleteFile = async (shareId: string, fileId: string | number) => {
         confirm("Do you want to delete this file?", async () => {
             const res = await fetch(`${API_URL}/shares/${shareId}/files/${fileId}`, { method: 'DELETE', credentials: 'include' });
             const data = await res.json(); // Lees antwoord van server
@@ -1956,17 +1993,54 @@ const MySharesView = () => {
                             {/* Bestanden */}
                             <div>
                                 <label className="text-xs font-bold text-neutral-500 uppercase mb-1 block">Files</label>
-                                <div className="bg-black border border-neutral-700 rounded-lg max-h-48 overflow-y-auto p-2 mb-2">
-                                    {editing.files?.map((f: any) => (
-                                        <div key={f.id} className="flex justify-between items-center p-3 border-b border-neutral-800 text-neutral-300 last:border-0 hover:bg-neutral-800 rounded">
-                                            <span className="truncate">{f.original_name}</span>
-                                            <button onClick={() => deleteFile(editing.id, f.id)} className="text-red-400 hover:text-red-300 p-1"><Trash2 className="w-4 h-4" /></button>
+
+                                {/* Hierarchical File Tree */}
+                                {(() => {
+                                    const dbItems: UploadItem[] = (editing.files || []).map((f: any) => ({
+                                        file: null,
+                                        path: f.original_name,
+                                        name: f.original_name.split('/').pop() || f.original_name,
+                                        id: f.id,
+                                        isDirectory: false,
+                                        size: f.size
+                                    }));
+                                    const newItems: UploadItem[] = newFiles.map(f => ({
+                                        file: f,
+                                        path: f.webkitRelativePath || f.name,
+                                        name: f.name,
+                                        id: 'temp-' + f.name + '-' + f.size,
+                                        isDirectory: false,
+                                        size: f.size
+                                    }));
+                                    const treeFiles = sortFiles(synthesizeDirectoryItems([...dbItems, ...newItems]));
+
+                                    return (
+                                        <div className="mb-2">
+                                            <FileTreeList
+                                                files={treeFiles}
+                                                onDelete={(item) => {
+                                                    if (item.isDirectory) {
+                                                        notify("To maintain integrity, please delete files individually.", "info");
+                                                        return;
+                                                    }
+                                                    if (String(item.id).startsWith('temp-')) {
+                                                        if (item.file) setNewFiles(newFiles.filter(f => f !== item.file));
+                                                    } else {
+                                                        deleteFile(editing.id, item.id);
+                                                    }
+                                                }}
+                                                onDownload={(item) => {
+                                                    if (String(item.id).startsWith('temp-')) {
+                                                        notify("Please save changes before downloading new files.", "info");
+                                                    } else {
+                                                        window.open(`${API_URL}/shares/${editing.id}/files/${item.id}`, '_blank');
+                                                    }
+                                                }}
+                                            />
                                         </div>
-                                    ))}
-                                    {newFiles.map((f, i) => (
-                                        <div key={i} className="flex justify-between items-center p-3 text-green-400 border-b border-neutral-800 last:border-0"><span className="truncate flex items-center gap-2"><Plus className="w-3 h-3" /> {f.name}</span><button onClick={() => setNewFiles(newFiles.filter((_, idx) => idx !== i))} className="text-red-400 p-1"><X className="w-4 h-4" /></button></div>
-                                    ))}
-                                </div>
+                                    );
+                                })()}
+
                                 <button onClick={() => fileInputRef.current?.click()} className="text-purple-400 hover:text-white text-sm font-bold flex items-center gap-2 transition"><Plus className="w-4 h-4" /> Add Files</button>
                                 <input ref={fileInputRef} type="file" multiple className="hidden" onChange={e => setNewFiles([...newFiles, ...Array.from((e.target.files) as FileList)])} />
                             </div>
