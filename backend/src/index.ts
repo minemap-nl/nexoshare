@@ -1,6 +1,7 @@
 import express, { Request, Response, RequestHandler, NextFunction } from 'express';
 import { Pool } from 'pg';
-import bcrypt from 'bcrypt';
+
+
 import jwt from 'jsonwebtoken';
 import multer from 'multer';
 import cors from 'cors';
@@ -875,12 +876,47 @@ const requireAdmin: RequestHandler = (req, res, next) => {
 };
 
 const checkUploadLimits: RequestHandler = async (req, res, next) => {
+    // 0. Pause stream immediately to prevent data loss during async config fetch
+    req.pause();
+
     const config = await getConfig();
     const maxBytes = getBytes(config.maxSizeVal || 10, config.maxSizeUnit || 'GB');
     const contentLength = parseInt(req.headers['content-length'] || '0');
+
+    // 1. Header Check
     if (contentLength > maxBytes) {
+        req.resume(); // Resume to discard/finish properly if needed, though we respond immediately
         return res.status(413).json({ error: `File too large. Maximum ${config.maxSizeVal} ${config.maxSizeUnit}` });
     }
+
+    // 2. Stream Monitor (Real-time enforcement)
+    let received = 0;
+    const onData = (chunk: Buffer) => {
+        received += chunk.length;
+        if (received > maxBytes) {
+            // Unsubscribe immediately
+            req.off('data', onData);
+            req.unpipe(); // Detach from destination (multer)
+            req.pause();  // Stop flow
+
+            // Allow response to be sent if header not flush
+            if (!res.headersSent) {
+                res.status(413).json({ error: `Upload exceeded limit of ${config.maxSizeVal} ${config.maxSizeUnit}` });
+            }
+
+            // Hard Kill connection to save bandwidth
+            req.destroy();
+        }
+    };
+
+    req.on('data', onData);
+
+    // Clean up listener on finish/close to prevent leaks
+    const onEnd = () => req.off('data', onData);
+    res.on('finish', onEnd);
+    res.on('close', onEnd);
+    req.on('end', onEnd);
+
     next();
 };
 
@@ -1048,12 +1084,12 @@ apiRouter.post('/auth/login', loginLimiter, async (req, res) => {
         // Als user niet bestaat, doen we TOCH een compare tegen een dummy hash
         // zodat de responstijd altijd ongeveer gelijk is.
         if (result.rows.length === 0) {
-            await bcrypt.compare(password, '$2b$10$Xw.sY.f/O/W.S/./././././././././././././././.');
+            await Bun.password.verify(password, '$2b$10$Xw.sY.f/O/W.S/./././././././././././././././.');
             return res.status(401).json({ error: genericError });
         }
 
         const user = result.rows[0];
-        const valid = await bcrypt.compare(password, result.rows[0].password_hash);
+        const valid = await Bun.password.verify(password, result.rows[0].password_hash);
         if (!valid) return res.status(401).json({ error: genericError });
 
         // Check if 2FA is enabled for this user
@@ -1138,7 +1174,7 @@ apiRouter.post('/auth/verify-2fa', loginLimiter, async (req, res) => {
         if (result.rows.length === 0) return res.status(401).json({ error: 'Invalid credentials' });
 
         const user = result.rows[0];
-        const validPassword = await bcrypt.compare(password, user.password_hash);
+        const validPassword = await Bun.password.verify(password, user.password_hash);
         if (!validPassword) return res.status(401).json({ error: 'Invalid credentials' });
 
         if (!user.totp_enabled) return res.status(400).json({ error: '2FA not enabled' });
@@ -1270,7 +1306,7 @@ apiRouter.post('/auth/2fa/disable', authenticateToken, async (req, res) => {
         const { password } = req.body;
 
         const result = await pool.query('SELECT password_hash FROM users WHERE id = $1', [authReq.user!.id]);
-        const valid = await bcrypt.compare(password, result.rows[0].password_hash);
+        const valid = await Bun.password.verify(password, result.rows[0].password_hash);
 
         if (!valid) {
             return res.status(401).json({ error: 'Incorrect Password' });
@@ -1646,7 +1682,7 @@ apiRouter.post('/auth/password-reset/complete', async (req, res) => {
             return res.status(400).json({ error: 'Token expired' });
         }
 
-        const hash = await bcrypt.hash(password, 10);
+        const hash = await Bun.password.hash(password);
 
         await pool.query('UPDATE users SET password_hash = $1 WHERE id = $2', [hash, result.rows[0].user_id]);
         await pool.query('UPDATE password_reset_tokens SET used = TRUE WHERE token = $1', [token]);
@@ -1690,7 +1726,7 @@ apiRouter.get('/utils/generate-id', authenticateToken, async (req, res) => {
 });
 
 // QR Code Generator
-apiRouter.get('/utils/qr', async (req, res) => {
+apiRouter.get('/utils/qr', authenticateToken, async (req, res) => {
     try {
         const url = req.query.url as string;
         if (!url) return res.status(400).send('URL required');
@@ -1803,7 +1839,7 @@ apiRouter.get('/auth/callback', async (req, res) => {
             console.log('[SSO DEBUG] Creating new user:', email);
             const countRes = await pool.query('SELECT COUNT(*) FROM users');
             const isAdmin = parseInt(countRes.rows[0].count) === 0;
-            const dummyHash = await bcrypt.hash(crypto.randomBytes(16).toString('hex'), 10);
+            const dummyHash = await Bun.password.hash(crypto.randomBytes(16).toString('hex'));
 
             const insertRes = await pool.query(
                 'INSERT INTO users (email, password_hash, name, is_admin) VALUES ($1, $2, $3, $4) RETURNING *',
@@ -2098,7 +2134,7 @@ apiRouter.post('/users', async (req, res) => {
         return res.status(400).json({ error: passwordCheck.error });
     }
 
-    const hash = await bcrypt.hash(password, 10);
+    const hash = await Bun.password.hash(password);
     try {
         const result = await pool.query('INSERT INTO users (email, password_hash, name, is_admin) VALUES ($1, $2, $3, $4) RETURNING id', [email, hash, name, is_admin]);
         await logAudit((req as AuthRequest).user!.id, 'user_created', 'user', result.rows[0].id.toString(), req, { email, is_admin });
@@ -2152,7 +2188,7 @@ apiRouter.put('/users/profile', authenticateToken, async (req, res) => {
         if (!currentPassword) return res.status(400).json({ error: 'Current password is required to change.' });
 
         const userRes = await pool.query('SELECT password_hash FROM users WHERE id = $1', [myId]);
-        const valid = await bcrypt.compare(currentPassword, userRes.rows[0].password_hash);
+        const valid = await Bun.password.verify(currentPassword, userRes.rows[0].password_hash);
         if (!valid) return res.status(401).json({ error: 'Current password is wrong' });
 
         // Validate password strength
@@ -2161,7 +2197,7 @@ apiRouter.put('/users/profile', authenticateToken, async (req, res) => {
             return res.status(400).json({ error: passwordCheck.error });
         }
 
-        const hash = await bcrypt.hash(password, 10);
+        const hash = await Bun.password.hash(password);
         updates.push(`password_hash = $${i}`);
         values.push(hash);
         i++;
@@ -2212,7 +2248,7 @@ apiRouter.delete('/users/me/delete', authenticateToken, async (req, res) => {
 
         // Verify password
         const result = await pool.query('SELECT password_hash FROM users WHERE id = $1', [authReq.user!.id]);
-        const valid = await bcrypt.compare(password, result.rows[0].password_hash);
+        const valid = await Bun.password.verify(password, result.rows[0].password_hash);
 
         if (!valid) {
             return res.status(401).json({ error: 'Incorrect Password' });
@@ -2256,7 +2292,7 @@ apiRouter.put('/users/:id', authenticateToken, requireAdmin, async (req, res) =>
             return res.status(400).json({ error: passwordCheck.error });
         }
 
-        const hash = await bcrypt.hash(password, 10);
+        const hash = await Bun.password.hash(password);
         updates.push(`password_hash = $${i}`);
         values.push(hash);
         i++;
@@ -2330,7 +2366,7 @@ apiRouter.post('/shares/init', authenticateToken, uploadLimiter, handleUploadId,
         const { name, expirationVal, expirationUnit, recipients, message, password, maxDownloads } = authReq.body;
         const shareId = authReq.uploadId!;
 
-        const passwordHash = password ? await bcrypt.hash(password, 10) : null;
+        const passwordHash = password ? await Bun.password.hash(password) : null;
         const config = await getConfig();
 
         let expiresAt = null;
@@ -2593,16 +2629,22 @@ apiRouter.post('/shares/:id/finalize', authenticateToken, async (req, res) => {
     }
 });
 
-apiRouter.put('/shares/:id', authenticateToken, upload.array('files'), handleUploadId, async (req, res) => {
+apiRouter.put('/shares/:id', authenticateToken, checkUploadLimits, upload.array('files'), handleUploadId, async (req, res) => {
     const client = await pool.connect();
     const authReq = req as AuthRequest;
     try {
-        const { name, expiration, password, customSlug, remove_password } = authReq.body; // remove_password toegevoegd
+        const { name, expiration, password, customSlug, remove_password, staged_files } = authReq.body; // remove_password en staged_files toegevoegd
         const currentId = authReq.params.id;
 
         // --- SCAN FILES ---
         if (authReq.files) {
             await scanFiles(authReq.files as Express.Multer.File[]);
+        }
+
+        // --- PROCESS STAGED FILES ---
+        const processedStagedFiles = [];
+        if (staged_files && Array.isArray(staged_files)) {
+            // Dit zijn bestandsnamen in TEMP_DIR die we moeten moven naar share map
         }
 
         let newId = currentId;
@@ -2627,7 +2669,7 @@ apiRouter.put('/shares/:id', authenticateToken, upload.array('files'), handleUpl
             updates.push(`password_hash = NULL`);
         } else if (password && password.trim() !== '') {
             // Nieuw Password instellen
-            const hash = await bcrypt.hash(password, 10);
+            const hash = await Bun.password.hash(password);
             updates.push(`password_hash = $${i++}`);
             values.push(hash);
         }
@@ -2684,6 +2726,47 @@ apiRouter.put('/shares/:id', authenticateToken, upload.array('files'), handleUpl
                 await client.query(`INSERT INTO files (share_id, filename, original_name, size, mime_type, storage_path) VALUES ($1, $2, $3, $4, $5, $6)`, [newId, file.filename, file.originalname, file.size, file.mimetype, file.path]);
             }
         }
+
+        // Process Staged Files
+        let stagedList: any[] = [];
+        if (staged_files) {
+            if (typeof staged_files === 'string') {
+                try { stagedList = JSON.parse(staged_files); } catch { }
+            } else if (Array.isArray(staged_files)) {
+                stagedList = staged_files;
+            }
+        }
+
+        if (stagedList.length > 0) {
+            const shareDir = path.join(UPLOAD_DIR, newId);
+            // Zorg dat map bestaat
+            await fs.mkdir(shareDir, { recursive: true }).catch(() => { });
+
+            for (const sFile of stagedList) {
+                if (!sFile.tempId || !sFile.originalName) continue;
+
+                // Security check path traversal
+                if (path.basename(sFile.tempId) !== sFile.tempId) continue;
+
+                const sourcePath = path.join(TEMP_DIR, sFile.tempId);
+                const safeExt = path.extname(sFile.originalName);
+                const finalName = crypto.randomBytes(8).toString('hex') + safeExt;
+                const destPath = path.join(shareDir, finalName);
+
+                try {
+                    await fs.rename(sourcePath, destPath);
+
+                    // Insert DB
+                    const safeOriginalName = sanitizeFilename(sFile.originalName);
+                    await client.query(`INSERT INTO files (share_id, filename, original_name, size, mime_type, storage_path) VALUES ($1, $2, $3, $4, $5, $6)`,
+                        [newId, finalName, safeOriginalName, sFile.size, sFile.mimeType, destPath]);
+
+                } catch (e) {
+                    console.error(`Failed to move staged file ${sFile.tempId}:`, e);
+                }
+            }
+        }
+
         await client.query('COMMIT');
         res.json({ success: true, newId });
     } catch (e: any) {
@@ -2737,6 +2820,110 @@ apiRouter.post('/shares/:id/resend', authenticateToken, async (req, res) => {
         }
     }
     res.json({ success: true });
+});
+
+
+// STAGE: Bestanden samenvoegen in TEMP maar nog niet aan share koppelen (preview mogelijk maken)
+apiRouter.post('/shares/:id/stage', authenticateToken, async (req, res) => {
+    const { id } = req.params;
+    const { files } = req.body; // Array of {fileName, fileId, size, totalChunks}
+
+    // We gebruiken hier GEEN DB transactie of cleaning, want het is temporary.
+    // De 'cleanup' job verwijdert oude meuk uit temp wel.
+
+    const stagedFiles = [];
+
+    try {
+        const config = await getConfig();
+        const k = 1024;
+        const sizeMap: any = { 'KB': k, 'MB': k * k, 'GB': k * k * k, 'TB': k * k * k * k };
+        const chunkSizeVal = config.chunkSizeVal || 50;
+        const chunkSizeUnit = config.chunkSizeUnit || 'MB';
+        const CHUNK_SIZE = chunkSizeVal * (sizeMap[chunkSizeUnit] || sizeMap['MB']);
+
+        for (const f of files) {
+            const safeFileName = path.basename(f.fileName);
+            // SECURITY: Generate a random ID to prevent file prediction/enumeration
+            const randomId = crypto.randomBytes(16).toString('hex');
+            const safeExt = path.extname(safeFileName);
+
+            // We slaan op als staged_{randomId}{ext}
+            const stagedName = `staged_${randomId}${safeExt}`;
+            const finalPath = path.join(TEMP_DIR, stagedName);
+            const totalChunks = Math.ceil(f.size / CHUNK_SIZE);
+
+            // Merge logic duplicating existing code... ideally refactor to helper
+            const { createReadStream, createWriteStream } = require('fs');
+            const dest = createWriteStream(finalPath);
+
+            for (let i = 0; i < totalChunks; i++) {
+                const partPath = path.join(TEMP_DIR, `${id}_${f.fileId}_${safeFileName}.part_${i}`);
+                try { await fs.access(partPath); } catch {
+                    // Als part mist, fail
+                    dest.end();
+                    throw new Error(`Missing part ${i} of ${f.fileName}`);
+                }
+
+                await new Promise((resolve, reject) => {
+                    const source = createReadStream(partPath);
+                    source.on('error', reject);
+                    source.pipe(dest, { end: false });
+                    source.on('end', resolve);
+                });
+                await fs.unlink(partPath).catch(() => { });
+            }
+            dest.end();
+            await new Promise(resolve => dest.on('finish', resolve));
+
+            // SCAN
+            if (clamscanInstance) {
+                const result = await clamscanInstance.isInfected(finalPath);
+                if (result.isInfected) {
+                    await fs.unlink(finalPath).catch(() => { });
+                    throw new Error(`Virus detected in ${f.fileName}!`);
+                }
+            }
+
+            stagedFiles.push({
+                tempId: stagedName,
+                originalName: f.fileName,
+                size: f.size,
+                mimeType: f.mimeType
+            });
+        }
+
+        res.json({ success: true, stagedFiles });
+    } catch (e: any) {
+        console.error('Stage error:', e);
+        res.status(500).json({ error: e.message || 'Staging failed' });
+    }
+});
+
+// PREVIEW STAGED FILE
+apiRouter.get('/shares/preview-stage/:tempId', authenticateToken, async (req, res) => {
+    const { tempId } = req.params;
+
+    // Security check: tempId mag geen slashes bevatten en moet beginnen met staged_
+    if (!tempId || tempId.includes('/') || tempId.includes('\\') || !tempId.startsWith('staged_')) {
+        return res.status(403).send('Invalid file');
+    }
+
+    const filePath = path.join(TEMP_DIR, tempId);
+    try {
+        await fs.access(filePath);
+
+        // Force download for dangerous types (XSS prevention)
+        const ext = path.extname(tempId).toLowerCase();
+        const dangerousTypes = ['.html', '.htm', '.xhtml', '.svg', '.xml', '.php'];
+
+        if (dangerousTypes.includes(ext)) {
+            return res.status(403).send('Preview not allowed for this file type');
+        }
+
+        res.sendFile(filePath);
+    } catch {
+        res.status(404).send('File not found or expired');
+    }
 });
 
 apiRouter.get('/shares/:id/download', downloadLimiter, async (req, res) => {
@@ -2926,7 +3113,7 @@ apiRouter.post('/reverse', authenticateToken, async (req, res) => {
             expiresAt = new Date(Date.now() + getTimeInMs(expirationVal, expirationUnit || 'Days'));
         }
 
-        const passHash = password ? await bcrypt.hash(password, 10) : null;
+        const passHash = password ? await Bun.password.hash(password) : null;
 
         // Voeg thank_you_message toe aan insert
         await pool.query(
@@ -3068,7 +3255,7 @@ apiRouter.post('/shares/:id/verify', loginLimiter, async (req, res) => {
 
     if (result.rows.length === 0) return res.status(404).json({ error: 'Not found' });
 
-    const valid = await bcrypt.compare(req.body.password, result.rows[0].password_hash);
+    const valid = await Bun.password.verify(req.body.password, result.rows[0].password_hash);
 
     if (valid) {
         // Maak een token aan dat bewijst dat dit IP/User het wachtwoord kent voor DEZE share
@@ -3107,14 +3294,35 @@ apiRouter.get('/shares/:id/files/:fileId', downloadLimiter, async (req, res) => 
 
     // BEVEILIGINGS CHECK: Als er een wachtwoord op zit, check het cookie
     if (shareInfo.rows[0].password_hash) {
-        const authCookie = cookies[authCookieName];
-        if (!authCookie) return res.status(403).send('Access Denied: Password required.');
+        let authorized = false;
 
-        try {
-            const decoded: any = jwt.verify(authCookie, JWT_SECRET);
-            if (decoded.shareId !== id) throw new Error('Mismatch');
-        } catch (e) {
-            return res.status(403).send('Access Denied: Session expired.');
+        // 1. Check Owner Token (Authorization Header or 'token' cookie)
+        const authToken = cookies.token || req.headers['authorization']?.split(' ')[1];
+        if (authToken) {
+            try {
+                const user = jwt.verify(authToken, JWT_SECRET) as any;
+                // Check if this user owns the share
+                const ownerCheck = await pool.query('SELECT id FROM shares WHERE id = $1 AND user_id = $2', [id, user.id]);
+                if (ownerCheck.rows.length > 0) {
+                    authorized = true;
+                }
+            } catch (e) {
+                // Ignore invalid main token here, we fall back to share password
+            }
+        }
+
+        // 2. Check Share Password Cookie
+        if (!authorized) {
+            const authCookie = cookies[authCookieName];
+            if (!authCookie) return res.status(403).send('Access Denied: Password required.');
+
+            try {
+                const decoded: any = jwt.verify(authCookie, JWT_SECRET);
+                if (decoded.shareId !== id) throw new Error('Mismatch');
+                authorized = true;
+            } catch (e) {
+                return res.status(403).send('Access Denied: Session expired.');
+            }
         }
     }
 
@@ -3177,7 +3385,7 @@ apiRouter.post('/public/reverse/:id/verify', loginLimiter, async (req, res) => {
 
     if (result.rows.length === 0) return res.status(404).json({ error: 'Not found' });
 
-    const valid = await bcrypt.compare(req.body.password, result.rows[0].password_hash);
+    const valid = await Bun.password.verify(req.body.password, result.rows[0].password_hash);
 
     if (valid) {
         // --- BEVEILIGING START ---
@@ -3471,11 +3679,11 @@ async function runCLI() {
         else if (command === 'list-users') { const r = await pool.query('SELECT id, email, name, is_admin, totp_enabled FROM users'); console.table(r.rows); }
         else if (command === 'create-user') {
             if (params.length < 4) { console.log('Usage: create-user <email> <name> <pass> <is_admin>'); return; }
-            await pool.query('INSERT INTO users (email, name, password_hash, is_admin) VALUES ($1, $2, $3, $4)', [params[0], params[1], await bcrypt.hash(params[2], 10), params[3] === 'true']);
+            await pool.query('INSERT INTO users (email, name, password_hash, is_admin) VALUES ($1, $2, $3, $4)', [params[0], params[1], await Bun.password.hash(params[2]), params[3] === 'true']);
             console.log(`User ${params[0]} created.`);
         }
         else if (command === 'set-admin') { await pool.query('UPDATE users SET is_admin=$1 WHERE email=$2', [params[1] === 'true', params[0]]); console.log(`Admin status for ${params[0]} set to ${params[1]}`); }
-        else if (command === 'reset-password') { await pool.query('UPDATE users SET password_hash=$1 WHERE email=$2', [await bcrypt.hash(params[1], 10), params[0]]); console.log(`Password reset for ${params[0]}`); }
+        else if (command === 'reset-password') { await pool.query('UPDATE users SET password_hash=$1 WHERE email=$2', [await Bun.password.hash(params[1]), params[0]]); console.log(`Password reset for ${params[0]}`); }
         else if (command === 'delete-user') { await pool.query('DELETE FROM users WHERE email=$1', [params[0]]); console.log(`User ${params[0]} deleted.`); }
         else if (command === '2fa-disable') {
             const r = await pool.query('SELECT id FROM users WHERE email=$1', [params[0]]);
@@ -3717,7 +3925,7 @@ async function initDB() {
                 const adminCheck = await client.query('SELECT COUNT(*) FROM users');
                 if (adminCheck.rows && adminCheck.rows.length > 0) {
                     if (parseInt(adminCheck.rows[0].count) === 0) {
-                        const hash = await bcrypt.hash('admin123', 10);
+                        const hash = await Bun.password.hash('admin123');
                         await client.query(`INSERT INTO users (email, password_hash, name, is_admin) VALUES ($1, $2, $3, $4)`, ['admin@nexoshare.com', hash, 'Super Admin', true]);
                         console.log('✅ DB Initialized & Healed. Login: admin@nexoshare.com / admin123');
                     } else {
@@ -3735,6 +3943,25 @@ async function initDB() {
                 if (JWT_SECRET === 'dev-secret-change-me') console.error('⚠️ DEFAULT SECRET IN USE');
 
                 app.use('/api', apiRouter);
+
+                // DYNAMIC MANIFEST (PWA)
+                app.get('/site.webmanifest', async (req, res) => {
+                    const config = await getConfig();
+                    const appName = config.appName || 'Nexo Share';
+                    res.json({
+                        "name": appName,
+                        "short_name": appName,
+                        "icons": [
+                            { "src": "/pwa-192x192.png", "sizes": "192x192", "type": "image/png" },
+                            { "src": "/pwa-512x512.png", "sizes": "512x512", "type": "image/png" }
+                        ],
+                        "start_url": "/",
+                        "display": "standalone",
+                        "background_color": "#000000",
+                        "theme_color": "#000000"
+                    });
+                });
+
                 // XSS Preventie op user uploads (SVG scripts blokkeren)
                 app.use('/api/uploads/system', (req, res, next) => {
                     res.setHeader('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; sandbox");

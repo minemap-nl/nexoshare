@@ -10,6 +10,11 @@ export default defineConfig({
         target: 'http://localhost:3001', // Verwijst naar je backend
         changeOrigin: true,
         secure: false,
+      },
+      '/site.webmanifest': {
+        target: 'http://localhost:3001',
+        changeOrigin: true,
+        secure: false,
       }
     }
   }

@@ -1,70 +1,52 @@
 # ---------------------------------------
 # STAGE 1: Frontend Bouwen
 # ---------------------------------------
-FROM node:20-alpine AS frontend-builder
+FROM oven/bun:1 AS frontend-builder
 WORKDIR /app/frontend
 
-# Update npm direct om CVE's in de build-tooling op te lossen
-RUN npm install -g npm@latest
+# Kopieer package files
+COPY frontend/package.json frontend/bun.lock ./
+# Installeer dependencies
+RUN bun install --frozen-lockfile
 
-# Kopieer package files en installeer dependencies
-COPY frontend/package*.json ./
-RUN npm install
-
-# Kopieer broncode en bouw de productie versie
+# Kopieer broncode en bouw
 COPY frontend/ .
-RUN npm run build
+RUN bun run build
 
 # ---------------------------------------
-# STAGE 2: Backend Bouwen
+# STAGE 2: Backend & Final Runs
 # ---------------------------------------
-FROM node:20-alpine AS backend-builder
+FROM oven/bun:1-alpine
 WORKDIR /app/backend
 
-# Update npm ook hier voor de zekerheid
-RUN npm install -g npm@latest
-
-# Kopieer package files en installeer dependencies
-COPY backend/package*.json ./
-RUN npm install
-
-# Kopieer broncode en bouw TypeScript naar JavaScript
-COPY backend/ .
-RUN npm run build
-
-# ---------------------------------------
-# STAGE 3: Final Production Image
-# ---------------------------------------
-FROM node:20-alpine
-WORKDIR /app/backend
-
+# Tijdzone data (vaak nodig)
 RUN apk add --no-cache tzdata
 
-# Update npm in de final image zodat 'npm install' veilig gebeurt
-RUN npm install -g npm@latest
+# Kopieer backend package config
+COPY backend/package.json backend/bun.lock ./
 
 # Installeer productie dependencies
-COPY backend/package*.json ./
-RUN npm install --only=production
+RUN bun install --frozen-lockfile --production
 
-# Kopieer de gebouwde code
-COPY --from=backend-builder /app/backend/dist ./dist
+# Kopieer broncode (Bun voert TS direct uit, dus geen build stap nodig)
+COPY backend/src ./src
+COPY backend/tsconfig.json ./
+
+# Kopieer de gebouwde frontend assets naar de juiste plek relatief aan backend
 COPY --from=frontend-builder /app/frontend/dist ../frontend/dist
 
-# Maak de upload map aan EN zet rechten goed
-RUN mkdir -p uploads && chown -R node:node /app
+# Maak de upload map aan en zet rechten (Bun image gebruikt user 'bun' met id 1000)
+RUN mkdir -p uploads && chown -R bun:bun /app
 
-# Environment variabelen
+# Environment defaults
 ENV TZ=UTC
-ENV APP_LOCALE=en-GB
-ENV PORT=3000
 ENV NODE_ENV=production
+ENV PORT=3000
 
-# Schakel over naar de veilige 'node' gebruiker
-USER node
+# Schakel over naar de veilige 'bun' gebruiker
+USER bun
 
-# Exposeer de poort
 EXPOSE 3000
 
-# Start de app
-CMD ["node", "dist/index.js"]
+# Start de applicatie
+CMD ["bun", "src/index.ts"]

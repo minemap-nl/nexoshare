@@ -1,14 +1,21 @@
 import React, { useState, useEffect, useRef, createContext, useContext } from 'react';
 import { createPortal } from 'react-dom';
+import { AnimatePresence, motion } from 'framer-motion';
+
 import { BrowserRouter, Routes, Route, Navigate, useParams } from 'react-router-dom';
 import {
-    Upload, Settings, Download, LogOut, Share2, Lock, Check, Copy,
-    Trash2, User, Shield, Globe, Mail, Plus, X, ArrowRight, Edit,
-    Contact, Eye, HardDrive, FileArchive, Send, AlertCircle, Info, XCircle, FileQuestion, Loader2, ChevronDown,
-    MessageSquare, Type, Calendar, Sparkles, Folder, CloudUpload, File
+    Download, Upload, File as FileIcon, Folder as FolderIcon, X, Check, Share2, Settings,
+    LogOut, User, Shield,
+    Trash2, Send, AlertTriangle, Loader2, Info,
+    XCircle, FileQuestion, CloudUpload, Eye,
+    Copy, Plus, AlertCircle, ArrowRight, ChevronDown, Edit,
+    Mail, Type, HardDrive, Calendar, MessageSquare, Globe,
+    Sparkles, FileArchive, Contact, Lock as LockIcon
 } from 'lucide-react';
 import axios from 'axios';
 import DOMPurify from 'dompurify';
+import FilePreviewModal from './components/preview/FilePreviewModal';
+import { useEscapeKey } from './hooks/useEscapeKey';
 import {
     startRegistration,
     startAuthentication
@@ -168,62 +175,121 @@ interface Toast { id: number; message: string; type: ToastType; }
 interface UIContextType {
     notify: (msg: string, type?: ToastType) => void;
     confirm: (msg: string, onConfirm: () => void) => void;
+    preview: (file: File | Blob | string, name: string, type?: string) => void;
+    isConfirming: boolean;
+    isPreviewing: boolean;
 }
 
 const UIContext = createContext<UIContextType | null>(null);
 
 const UIProvider = ({ children }: { children: React.ReactNode }) => {
     const [toasts, setToasts] = useState<Toast[]>([]);
-    const [confirmState, setConfirmState] = useState<{ isOpen: boolean, msg: string, action: () => void } | null>(null);
+    const [confirmMessage, setConfirmMessage] = useState<string | null>(null);
+    const [confirmCallback, setConfirmCallback] = useState<(() => void) | null>(null);
+
+    // Preview State
+    const [previewFile, setPreviewFile] = useState<File | Blob | string | null>(null);
+    const [previewName, setPreviewName] = useState<string>('');
+    const [previewType, setPreviewType] = useState<string | undefined>(undefined);
 
     const notify = (message: string, type: ToastType = 'info') => {
         const id = Date.now();
         setToasts(prev => [...prev, { id, message, type }]);
-        setTimeout(() => removeToast(id), 4000);
+        setTimeout(() => removeToast(id), 5000);
     };
 
     const removeToast = (id: number) => setToasts(prev => prev.filter(t => t.id !== id));
 
     const confirm = (msg: string, onConfirm: () => void) => {
-        setConfirmState({ isOpen: true, msg, action: onConfirm });
+        setConfirmMessage(msg);
+        setConfirmCallback(() => onConfirm);
     };
 
     const handleConfirm = () => {
-        if (confirmState) confirmState.action();
-        setConfirmState(null);
+        if (confirmCallback) confirmCallback();
+        setConfirmMessage(null);
+        setConfirmCallback(null);
     };
 
+    const preview = React.useCallback((file: File | Blob | string, name: string, type?: string) => {
+        setPreviewFile(file);
+        setPreviewName(name);
+        setPreviewType(type);
+    }, []);
+
+    const closePreview = React.useCallback(() => {
+        setPreviewFile(null);
+        setPreviewName('');
+        setPreviewType(undefined);
+    }, []);
+
+    const cancelConfirm = () => {
+        setConfirmMessage(null);
+        setConfirmCallback(null);
+    };
+
+    // Esc key for Confirm Modal (High priority)
+    useEscapeKey(cancelConfirm, !!confirmMessage);
+
     return (
-        <UIContext.Provider value={{ notify, confirm }}>
+        <UIContext.Provider value={{ notify, confirm, preview, isConfirming: !!confirmMessage, isPreviewing: !!previewFile }}>
             {children}
-            <div className="fixed top-5 right-2 md:right-5 z-[10001] flex flex-col gap-3 pointer-events-none max-w-[calc(100vw-1rem)] md:max-w-none">
-                {toasts.map(t => (
-                    <div key={t.id} className={`anim-toast pointer-events-auto min-w-[280px] md:min-w-[300px] p-3 md:p-4 rounded-xl shadow-2xl border flex items-center gap-2 md:gap-3 text-white backdrop-blur-md ${t.type === 'success' ? 'bg-green-600/90 border-green-500' :
-                        t.type === 'error' ? 'bg-red-600/90 border-red-500' : 'bg-neutral-800/90 border-neutral-600'
+            <div className="fixed bottom-4 right-4 z-[10003] flex flex-col gap-2">
+                {toasts.map(toast => (
+                    <div key={toast.id} className={`p-4 rounded-xl shadow-lg text-white font-medium flex items-center gap-3 anim-slide ${toast.type === 'error' ? 'bg-red-500' :
+                        toast.type === 'success' ? 'bg-green-500' :
+                            'bg-neutral-800 border border-neutral-700'
                         }`}>
-                        {t.type === 'success' && <Check className="w-4 h-4 md:w-5 md:h-5 flex-shrink-0" />}
-                        {t.type === 'error' && <XCircle className="w-4 h-4 md:w-5 md:h-5 flex-shrink-0" />}
-                        {t.type === 'info' && <Info className="w-4 h-4 md:w-5 md:h-5 flex-shrink-0" />}
-                        <span className="font-medium text-xs md:text-sm flex-1">{t.message}</span>
-                        <button onClick={() => removeToast(t.id)} className="ml-auto opacity-70 hover:opacity-100 flex-shrink-0"><X className="w-4 h-4" /></button>
+                        {toast.type === 'error' ? <AlertTriangle className="w-5 h-5" /> :
+                            toast.type === 'success' ? <Check className="w-5 h-5" /> :
+                                <Info className="w-5 h-5 text-purple-400" />}
+                        {toast.message}
+                        <button onClick={() => removeToast(toast.id)} className="ml-2 hover:bg-black/20 p-1 rounded"><X className="w-3 h-3" /></button>
                     </div>
                 ))}
             </div>
-            {confirmState && createPortal(
-                <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[10002] flex items-center justify-center p-4 anim-fade">
-                    <div className="bg-neutral-900 border border-neutral-700 p-4 md:p-6 rounded-2xl max-w-sm w-full shadow-2xl anim-scale text-center">
-                        <div className="w-16 h-16 bg-red-500/20 rounded-full flex items-center justify-center mx-auto mb-4">
-                            <AlertCircle className="w-8 h-8 text-red-500" />
-                        </div>
-                        <h3 className="text-lg md:text-xl font-bold text-white mb-2">Are you sure?</h3>
-                        <p className="text-sm md:text-base text-neutral-400 mb-4 md:mb-6">{confirmState.msg}</p>
-                        <div className="flex gap-2 md:gap-3 justify-center flex-col sm:flex-row">
-                            <button onClick={() => setConfirmState(null)} className="px-6 py-2 rounded-lg text-neutral-300 hover:bg-neutral-800 transition font-medium">Cancel</button>
-                            <button onClick={handleConfirm} className="px-6 py-2 rounded-lg bg-red-600 hover:bg-red-700 text-white font-bold transition btn-press shadow-lg shadow-red-900/20">Confirm</button>
-                        </div>
-                    </div>
-                </div>, document.body
-            )}
+
+            {/* Confirm Modal */}
+            <AnimatePresence>
+                {confirmMessage && (
+                    <motion.div
+                        key="confirm-modal"
+                        initial={{ opacity: 0, backdropFilter: "blur(0px)" }}
+                        animate={{ opacity: 1, backdropFilter: "blur(4px)" }}
+                        exit={{ opacity: 0, backdropFilter: "blur(0px)" }}
+                        className="fixed inset-0 z-[10002] flex items-center justify-center p-4 bg-black/60"
+                        onClick={cancelConfirm}
+                    >
+                        <motion.div
+                            initial={{ scale: 0.95, opacity: 0 }}
+                            animate={{ scale: 1, opacity: 1 }}
+                            exit={{ scale: 0.95, opacity: 0 }}
+                            onClick={(e: React.MouseEvent) => e.stopPropagation()}
+                            className="bg-neutral-900 border border-neutral-800 p-6 rounded-2xl shadow-2xl max-w-sm w-full"
+                        >
+                            <h3 className="text-xl font-bold text-white mb-2">Confirm</h3>
+                            <p className="text-neutral-400 mb-6">{confirmMessage}</p>
+                            <div className="flex gap-3">
+                                <button onClick={() => setConfirmMessage(null)} className="flex-1 bg-neutral-800 hover:bg-neutral-700 text-white p-2 rounded-lg font-bold transition">Cancel</button>
+                                <button onClick={handleConfirm} className="flex-1 bg-red-600 hover:bg-red-700 text-white p-2 rounded-lg font-bold transition shadow-lg shadow-red-900/20">Confirm</button>
+                            </div>
+                        </motion.div>
+                    </motion.div>
+                )}
+            </AnimatePresence>
+
+            {/* File Preview Modal */}
+            {/* File Preview Modal */}
+            <AnimatePresence>
+                {previewFile && (
+                    <FilePreviewModal
+                        file={previewFile}
+                        name={previewName}
+                        type={previewType}
+                        onClose={closePreview}
+                    />
+                )}
+            </AnimatePresence>
         </UIContext.Provider>
     );
 };
@@ -425,7 +491,13 @@ const ProfileView = ({ user, config, forcedSetup = false, onComplete }: { user: 
     const [showDeleteAccount, setShowDeleteAccount] = useState(false);
     const [deletePassword, setDeletePassword] = useState('');
 
-    const { notify, confirm } = useUI();
+    const { notify, confirm, isConfirming, isPreviewing } = useUI();
+
+    // Esc keys
+    useEscapeKey(() => { setShow2FASetup(false); setTwoFactorSecret(''); setTwoFactorQR(''); }, show2FASetup && !isConfirming && !isPreviewing);
+    useEscapeKey(() => setShow2FADisable(false), show2FADisable && !isConfirming && !isPreviewing);
+    useEscapeKey(() => setShowPasskeyAdd(false), showPasskeyAdd && !isConfirming && !isPreviewing);
+    useEscapeKey(() => setShowDeleteAccount(false), showDeleteAccount && !isConfirming && !isPreviewing);
 
     useEffect(() => {
         fetch2FAStatus();
@@ -679,7 +751,7 @@ const ProfileView = ({ user, config, forcedSetup = false, onComplete }: { user: 
                             {/* Password Sectie */}
                             <div className="pt-4 border-t border-neutral-800 mt-4">
                                 <h3 className="text-white font-bold mb-4 flex items-center gap-2">
-                                    <Lock className="w-4 h-4 text-purple-500" /> Change Password
+                                    <LockIcon className="w-4 h-4 text-purple-500" /> Change Password
                                 </h3>
 
                                 <div className="grid gap-4">
@@ -818,155 +890,216 @@ const ProfileView = ({ user, config, forcedSetup = false, onComplete }: { user: 
             </div>
 
             {/* 2FA Setup Modal */}
-            {show2FASetup && (
-                <ModalPortal>
-                    <div
-                        className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[9999] flex items-center justify-center p-4"
-                        onClick={() => { setShow2FASetup(false); setTwoFactorSecret(''); setTwoFactorQR(''); }}
-                    >
-                        <div
-                            className="bg-neutral-900 p-8 rounded-2xl border border-neutral-800 max-w-md w-full shadow-2xl anim-scale"
-                            onClick={e => e.stopPropagation()}
+            <AnimatePresence>
+                {show2FASetup && (
+                    <ModalPortal>
+                        <motion.div
+                            key="2fa-setup-modal"
+                            initial={{ opacity: 0, backdropFilter: "blur(0px)" }}
+                            animate={{ opacity: 1, backdropFilter: "blur(4px)" }}
+                            exit={{ opacity: 0, backdropFilter: "blur(0px)" }}
+                            className="fixed inset-0 bg-black/80 z-[9999] flex items-center justify-center p-4"
+                            onClick={() => { setShow2FASetup(false); setTwoFactorSecret(''); setTwoFactorQR(''); }}
                         >
-                            <h2 className="text-2xl font-bold mb-4 text-white">Configure 2FA</h2>
+                            <motion.div
+                                initial={{ scale: 0.95, opacity: 0 }}
+                                animate={{ scale: 1, opacity: 1 }}
+                                exit={{ scale: 0.95, opacity: 0 }}
+                                className="bg-neutral-900 p-8 rounded-2xl border border-neutral-800 max-w-md w-full shadow-2xl"
+                                onClick={(e: React.MouseEvent) => e.stopPropagation()}
+                            >
+                                <h2 className="text-2xl font-bold mb-4 text-white">Configure 2FA</h2>
 
-                            {twoFactorBackupCodes.length === 0 ? (
-                                <>
-                                    <p className="text-neutral-300 mb-4">Scan this QR code with your authenticator app:</p>
+                                {twoFactorBackupCodes.length === 0 ? (
+                                    <>
+                                        <p className="text-neutral-300 mb-4">Scan this QR code with your authenticator app:</p>
 
-                                    {/* Witte achtergrond voor QR zorgt voor beter contrast */}
-                                    <div className="bg-white p-2 rounded-lg mb-4 flex justify-center">
-                                        {twoFactorQR && <img src={twoFactorQR} className="rounded max-h-48" alt="2FA QR Code" />}
-                                    </div>
+                                        {/* Witte achtergrond voor QR zorgt voor beter contrast */}
+                                        <div className="bg-white p-2 rounded-lg mb-4 flex justify-center">
+                                            {twoFactorQR && <img src={twoFactorQR} className="rounded max-h-48" alt="2FA QR Code" />}
+                                        </div>
 
-                                    <div className="bg-black rounded-lg p-3 mb-4 border border-neutral-800">
-                                        <p className="text-neutral-400 text-xs mb-1">Or enter manually:</p>
-                                        <p className="text-white font-mono text-sm break-all select-all">{twoFactorSecret}</p>
-                                    </div>
+                                        <div className="bg-black rounded-lg p-3 mb-4 border border-neutral-800">
+                                            <p className="text-neutral-400 text-xs mb-1">Or enter manually:</p>
+                                            <p className="text-white font-mono text-sm break-all select-all">{twoFactorSecret}</p>
+                                        </div>
 
-                                    <form onSubmit={handleEnable2FA}>
-                                        <input
-                                            type="text"
-                                            className="w-full bg-black border border-neutral-700 text-white rounded-lg p-3 mb-4 focus:border-purple-500 outline-none text-center text-2xl tracking-widest"
-                                            placeholder="000000"
-                                            value={twoFactorCode}
-                                            onChange={e => setTwoFactorCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
-                                            maxLength={6}
-                                            required
-                                        />
-                                        <div className="flex gap-3">
-                                            <button type="button" onClick={() => { setShow2FASetup(false); setTwoFactorSecret(''); setTwoFactorQR(''); }} className="flex-1 bg-neutral-800 hover:bg-neutral-700 text-white p-3 rounded-lg font-bold transition btn-press border border-neutral-700">
-                                                Cancel
+                                        <form onSubmit={handleEnable2FA}>
+                                            <input
+                                                type="text"
+                                                className="w-full bg-black border border-neutral-700 text-white rounded-lg p-3 mb-4 focus:border-purple-500 outline-none text-center text-2xl tracking-widest"
+                                                placeholder="000000"
+                                                value={twoFactorCode}
+                                                onChange={e => setTwoFactorCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                                                maxLength={6}
+                                                required
+                                            />
+                                            <div className="flex gap-3">
+                                                <button type="button" onClick={() => { setShow2FASetup(false); setTwoFactorSecret(''); setTwoFactorQR(''); }} className="flex-1 bg-neutral-800 hover:bg-neutral-700 text-white p-3 rounded-lg font-bold transition btn-press border border-neutral-700">
+                                                    Cancel
+                                                </button>
+                                                <button type="submit" className="flex-1 bg-purple-600 hover:bg-purple-700 text-white p-3 rounded-lg font-bold transition btn-press shadow-[0_0_15px_rgba(147,51,234,0.3)]">
+                                                    Activate
+                                                </button>
+                                            </div>
+                                        </form>
+                                    </>
+                                ) : (
+                                    <>
+                                        <p className="text-green-400 mb-4 font-bold flex items-center gap-2">✓ 2FA successfully enabled!</p>
+
+                                        <p className="text-neutral-300 text-sm mb-4">
+                                            These are your backup codes. Keep them safe! You'll need them if you lose your phone.
+                                        </p>
+
+                                        {/* --- KNOPPEN VOOR ALLES --- */}
+                                        <div className="flex gap-3 mb-4">
+                                            <button
+                                                onClick={handleDownloadCodes}
+                                                className="flex-1 bg-neutral-800 hover:bg-neutral-700 text-white p-3 rounded-lg font-bold transition btn-press border border-neutral-700 flex items-center justify-center gap-2"
+                                            >
+                                                <Download className="w-4 h-4" /> Download .txt
                                             </button>
-                                            <button type="submit" className="flex-1 bg-purple-600 hover:bg-purple-700 text-white p-3 rounded-lg font-bold transition btn-press shadow-[0_0_15px_rgba(147,51,234,0.3)]">
-                                                Activate
+                                            <button
+                                                onClick={handleCopyAllCodes}
+                                                className="flex-1 bg-neutral-800 hover:bg-neutral-700 text-white p-3 rounded-lg font-bold transition btn-press border border-neutral-700 flex items-center justify-center gap-2"
+                                            >
+                                                <Copy className="w-4 h-4" /> Copy everything
                                             </button>
                                         </div>
-                                    </form>
-                                </>
-                            ) : (
-                                <>
-                                    <p className="text-green-400 mb-4 font-bold flex items-center gap-2">✓ 2FA successfully enabled!</p>
 
-                                    <p className="text-neutral-300 text-sm mb-4">
-                                        These are your backup codes. Keep them safe! You'll need them if you lose your phone.
-                                    </p>
+                                        <div className="bg-black rounded-lg p-4 mb-4 space-y-2 max-h-60 overflow-y-auto border border-neutral-800">
+                                            {twoFactorBackupCodes.map((code, i) => (
+                                                <div key={i} className="flex items-center justify-center bg-neutral-900 p-2 rounded border border-neutral-800">
+                                                    <code className="text-white font-mono text-lg tracking-widest">{code}</code>
+                                                </div>
+                                            ))}
+                                        </div>
 
-                                    {/* --- KNOPPEN VOOR ALLES --- */}
-                                    <div className="flex gap-3 mb-4">
-                                        <button
-                                            onClick={handleDownloadCodes}
-                                            className="flex-1 bg-neutral-800 hover:bg-neutral-700 text-white p-3 rounded-lg font-bold transition btn-press border border-neutral-700 flex items-center justify-center gap-2"
-                                        >
-                                            <Download className="w-4 h-4" /> Download .txt
+                                        <button onClick={() => { setShow2FASetup(false); setTwoFactorBackupCodes([]); setTwoFactorSecret(''); setTwoFactorQR(''); if (onComplete) onComplete(); }} className="w-full bg-purple-600 hover:bg-purple-700 text-white p-3 rounded-lg font-bold transition btn-press">
+                                            I saved them, Close
                                         </button>
-                                        <button
-                                            onClick={handleCopyAllCodes}
-                                            className="flex-1 bg-neutral-800 hover:bg-neutral-700 text-white p-3 rounded-lg font-bold transition btn-press border border-neutral-700 flex items-center justify-center gap-2"
-                                        >
-                                            <Copy className="w-4 h-4" /> Copy everything
-                                        </button>
-                                    </div>
-
-                                    <div className="bg-black rounded-lg p-4 mb-4 space-y-2 max-h-60 overflow-y-auto border border-neutral-800">
-                                        {twoFactorBackupCodes.map((code, i) => (
-                                            <div key={i} className="flex items-center justify-center bg-neutral-900 p-2 rounded border border-neutral-800">
-                                                <code className="text-white font-mono text-lg tracking-widest">{code}</code>
-                                            </div>
-                                        ))}
-                                    </div>
-
-                                    <button onClick={() => { setShow2FASetup(false); setTwoFactorBackupCodes([]); setTwoFactorSecret(''); setTwoFactorQR(''); if (onComplete) onComplete(); }} className="w-full bg-purple-600 hover:bg-purple-700 text-white p-3 rounded-lg font-bold transition btn-press">
-                                        I saved them, Close
-                                    </button>
-                                </>
-                            )}
-                        </div>
-                    </div>
-                </ModalPortal>
-            )}
+                                    </>
+                                )}
+                            </motion.div>
+                        </motion.div>
+                    </ModalPortal>
+                )}
+            </AnimatePresence>
 
             {/* 2FA Disable Modal */}
-            {show2FADisable && (
-                <div className="fixed inset-0 bg-black/80 flex items-center justify-center p-4 z-50" onClick={() => setShow2FADisable(false)}>
-                    <div className="bg-neutral-900 p-8 rounded-2xl border border-neutral-800 max-w-md w-full" onClick={e => e.stopPropagation()}>
-                        <h2 className="text-2xl font-bold mb-4 text-white">Disable 2FA</h2>
-                        <p className="text-neutral-300 mb-4">Enter your password to disable 2FA:</p>
-                        <form onSubmit={handleDisable2FA}>
-                            <input type="password" autoComplete="current-password" className="w-full bg-black border border-neutral-700 text-white rounded-lg p-3 mb-4 focus:border-purple-500 outline-none" placeholder="Password" value={disable2FAPassword} onChange={e => setDisable2FAPassword(e.target.value)} required />
-                            <div className="flex gap-3">
-                                <button type="button" onClick={() => { setShow2FADisable(false); setDisable2FAPassword(''); }} className="flex-1 bg-neutral-800 hover:bg-neutral-700 text-white p-3 rounded-lg font-bold transition btn-press">
-                                    Cancel
-                                </button>
-                                <button type="submit" className="flex-1 bg-red-600 hover:bg-red-700 text-white p-3 rounded-lg font-bold transition btn-press">
-                                    Turn off
-                                </button>
-                            </div>
-                        </form>
-                    </div>
-                </div>
-            )}
+            <AnimatePresence>
+                {show2FADisable && (
+                    <ModalPortal>
+                        <motion.div
+                            key="2fa-disable-modal"
+                            initial={{ opacity: 0, backdropFilter: "blur(0px)" }}
+                            animate={{ opacity: 1, backdropFilter: "blur(4px)" }}
+                            exit={{ opacity: 0, backdropFilter: "blur(0px)" }}
+                            className="fixed inset-0 bg-black/80 flex items-center justify-center p-4 z-50"
+                            onClick={() => setShow2FADisable(false)}
+                        >
+                            <motion.div
+                                initial={{ scale: 0.95, opacity: 0 }}
+                                animate={{ scale: 1, opacity: 1 }}
+                                exit={{ scale: 0.95, opacity: 0 }}
+                                className="bg-neutral-900 p-8 rounded-2xl border border-neutral-800 max-w-md w-full"
+                                onClick={(e: React.MouseEvent) => e.stopPropagation()}
+                            >
+                                <h2 className="text-2xl font-bold mb-4 text-white">Disable 2FA</h2>
+                                <p className="text-neutral-300 mb-4">Enter your password to disable 2FA:</p>
+                                <form onSubmit={handleDisable2FA}>
+                                    <input type="password" autoComplete="current-password" className="w-full bg-black border border-neutral-700 text-white rounded-lg p-3 mb-4 focus:border-purple-500 outline-none" placeholder="Password" value={disable2FAPassword} onChange={e => setDisable2FAPassword(e.target.value)} required />
+                                    <div className="flex gap-3">
+                                        <button type="button" onClick={() => { setShow2FADisable(false); setDisable2FAPassword(''); }} className="flex-1 bg-neutral-800 hover:bg-neutral-700 text-white p-3 rounded-lg font-bold transition btn-press">
+                                            Cancel
+                                        </button>
+                                        <button type="submit" className="flex-1 bg-red-600 hover:bg-red-700 text-white p-3 rounded-lg font-bold transition btn-press">
+                                            Turn off
+                                        </button>
+                                    </div>
+                                </form>
+                            </motion.div>
+                        </motion.div>
+                    </ModalPortal>
+                )}
+            </AnimatePresence>
 
             {/* Passkey Add Modal */}
-            {showPasskeyAdd && (
-                <div className="fixed inset-0 bg-black/80 flex items-center justify-center p-4 z-50" onClick={() => setShowPasskeyAdd(false)}>
-                    <div className="bg-neutral-900 p-8 rounded-2xl border border-neutral-800 max-w-md w-full" onClick={e => e.stopPropagation()}>
-                        <h2 className="text-2xl font-bold mb-4 text-white">Add Passkey</h2>
-                        <p className="text-neutral-300 mb-4">Give your passkey a recognizable name:</p>
-                        <input type="text" className="w-full bg-black border border-neutral-700 text-white rounded-lg p-3 mb-4 focus:border-purple-500 outline-none" placeholder="For example: iPhone, Windows Hello, YubiKey" value={passkeyName} onChange={e => setPasskeyName(e.target.value)} />
-                        <div className="flex gap-3">
-                            <button onClick={() => { setShowPasskeyAdd(false); setPasskeyName(''); }} className="flex-1 bg-neutral-800 hover:bg-neutral-700 text-white p-3 rounded-lg font-bold transition btn-press">
-                                Cancel
-                            </button>
-                            <button onClick={handleRegisterPasskey} className="flex-1 bg-purple-600 hover:bg-purple-700 text-white p-3 rounded-lg font-bold transition btn-press">
-                                Register
-                            </button>
-                        </div>
-                    </div>
-                </div>
-            )}
+            <AnimatePresence>
+                {showPasskeyAdd && (
+                    <ModalPortal>
+                        <motion.div
+                            key="passkey-add-modal"
+                            initial={{ opacity: 0, backdropFilter: "blur(0px)" }}
+                            animate={{ opacity: 1, backdropFilter: "blur(4px)" }}
+                            exit={{ opacity: 0, backdropFilter: "blur(0px)" }}
+                            className="fixed inset-0 bg-black/80 flex items-center justify-center p-4 z-50"
+                            onClick={() => setShowPasskeyAdd(false)}
+                        >
+                            <motion.div
+                                initial={{ scale: 0.95, opacity: 0 }}
+                                animate={{ scale: 1, opacity: 1 }}
+                                exit={{ scale: 0.95, opacity: 0 }}
+                                className="bg-neutral-900 p-8 rounded-2xl border border-neutral-800 max-w-md w-full"
+                                onClick={(e: React.MouseEvent) => e.stopPropagation()}
+                            >
+                                <h2 className="text-2xl font-bold mb-4 text-white">Add Passkey</h2>
+                                <p className="text-neutral-300 mb-4">Give your passkey a recognizable name:</p>
+                                <input type="text" className="w-full bg-black border border-neutral-700 text-white rounded-lg p-3 mb-4 focus:border-purple-500 outline-none" placeholder="For example: iPhone, Windows Hello, YubiKey" value={passkeyName} onChange={e => setPasskeyName(e.target.value)} />
+                                <div className="flex gap-3">
+                                    <button onClick={() => { setShowPasskeyAdd(false); setPasskeyName(''); }} className="flex-1 bg-neutral-800 hover:bg-neutral-700 text-white p-3 rounded-lg font-bold transition btn-press">
+                                        Cancel
+                                    </button>
+                                    <button onClick={handleRegisterPasskey} className="flex-1 bg-purple-600 hover:bg-purple-700 text-white p-3 rounded-lg font-bold transition btn-press">
+                                        Register
+                                    </button>
+                                </div>
+                            </motion.div>
+                        </motion.div>
+                    </ModalPortal>
+                )}
+            </AnimatePresence>
 
             {/* Delete Account Modal */}
-            {showDeleteAccount && (
-                <div className="fixed inset-0 bg-black/80 flex items-center justify-center p-4 z-50" onClick={() => setShowDeleteAccount(false)}>
-                    <div className="bg-neutral-900 p-8 rounded-2xl border border-red-500/50 max-w-md w-full" onClick={e => e.stopPropagation()}>
-                        <h2 className="text-2xl font-bold mb-4 text-red-500 flex items-center gap-2"><AlertCircle /> Delete Account</h2>
-                        <p className="text-neutral-300 mb-4">This action <strong>cannot</strong> be undone. All your data will be permanently deleted.</p>
-                        <form onSubmit={handleDeleteAccount}>
-                            <label className="block text-neutral-400 text-sm font-bold mb-2">Enter your password to confirm:</label>
-                            <input type="password" autoComplete="current-password" className="w-full bg-black border border-neutral-700 text-white rounded-lg p-3 mb-4 focus:border-red-500 outline-none" placeholder="Password" value={deletePassword} onChange={e => setDeletePassword(e.target.value)} required />
-                            <div className="flex gap-3">
-                                <button type="button" onClick={() => { setShowDeleteAccount(false); setDeletePassword(''); }} className="flex-1 bg-neutral-800 hover:bg-neutral-700 text-white p-3 rounded-lg font-bold transition btn-press">
-                                    Cancel
-                                </button>
-                                <button type="submit" className="flex-1 bg-red-600 hover:bg-red-700 text-white p-3 rounded-lg font-bold transition btn-press">
-                                    Delete permanently
-                                </button>
-                            </div>
-                        </form>
-                    </div>
-                </div>
-            )}
+            {/* Delete Account Modal */}
+            <AnimatePresence>
+                {showDeleteAccount && (
+                    <ModalPortal>
+                        <motion.div
+                            key="delete-account-modal"
+                            initial={{ opacity: 0, backdropFilter: "blur(0px)" }}
+                            animate={{ opacity: 1, backdropFilter: "blur(4px)" }}
+                            exit={{ opacity: 0, backdropFilter: "blur(0px)" }}
+                            className="fixed inset-0 bg-black/80 flex items-center justify-center p-4 z-50"
+                            onClick={() => setShowDeleteAccount(false)}
+                        >
+                            <motion.div
+                                initial={{ scale: 0.95, opacity: 0 }}
+                                animate={{ scale: 1, opacity: 1 }}
+                                exit={{ scale: 0.95, opacity: 0 }}
+                                className="bg-neutral-900 p-8 rounded-2xl border border-red-500/50 max-w-md w-full"
+                                onClick={(e: React.MouseEvent) => e.stopPropagation()}
+                            >
+                                <h2 className="text-2xl font-bold mb-4 text-red-500 flex items-center gap-2"><AlertCircle /> Delete Account</h2>
+                                <p className="text-neutral-300 mb-4">This action <strong>cannot</strong> be undone. All your data will be permanently deleted.</p>
+                                <form onSubmit={handleDeleteAccount}>
+                                    <label className="block text-neutral-400 text-sm font-bold mb-2">Enter your password to confirm:</label>
+                                    <input type="password" autoComplete="current-password" className="w-full bg-black border border-neutral-700 text-white rounded-lg p-3 mb-4 focus:border-red-500 outline-none" placeholder="Password" value={deletePassword} onChange={e => setDeletePassword(e.target.value)} required />
+                                    <div className="flex gap-3">
+                                        <button type="button" onClick={() => { setShowDeleteAccount(false); setDeletePassword(''); }} className="flex-1 bg-neutral-800 hover:bg-neutral-700 text-white p-3 rounded-lg font-bold transition btn-press">
+                                            Cancel
+                                        </button>
+                                        <button type="submit" className="flex-1 bg-red-600 hover:bg-red-700 text-white p-3 rounded-lg font-bold transition btn-press">
+                                            Delete permanently
+                                        </button>
+                                    </div>
+                                </form>
+                            </motion.div>
+                        </motion.div>
+                    </ModalPortal>
+                )}
+            </AnimatePresence>
         </div>
     );
 };
@@ -1116,41 +1249,7 @@ const synthesizeDirectoryItems = (items: UploadItem[]): UploadItem[] => {
     return [...foldersToAdd.values(), ...items];
 };
 
-const FileTreeList = ({ files, onDelete, readOnly = false, onDownload }: { files: UploadItem[], onDelete?: (item: UploadItem) => void, readOnly?: boolean, onDownload?: (item: UploadItem) => void }) => {
-    return (
-        <div className="bg-black/20 border border-neutral-700/50 rounded-lg max-h-64 overflow-y-auto p-1">
-            {files.length === 0 && <div className="p-4 text-center text-neutral-500 text-sm">No files</div>}
-            {files.map(item => {
-                const segments = item.path.split('/');
-                const depth = Math.max(0, segments.length - 1);
-                const indent = depth * 20;
 
-                return (
-                    <div key={item.id} className={`flex justify-between items-center p-2 border-b border-neutral-800/50 last:border-0 hover:bg-neutral-800/50 rounded text-sm ${item.isDirectory ? 'bg-neutral-800/20' : ''}`}>
-                        <div className="flex items-center gap-2 overflow-hidden flex-1 min-w-0" style={{ paddingLeft: `${indent}px` }}>
-                            <div className="flex-shrink-0 w-5 flex justify-center">
-                                {item.isDirectory ? <Folder className="w-4 h-4 text-purple-400" /> : <File className="w-4 h-4 text-neutral-500" />}
-                            </div>
-                            <span className={`truncate ${item.isDirectory ? 'text-purple-300 font-bold' : 'text-neutral-300'}`}>{item.name}</span>
-                        </div>
-
-                        <div className="flex items-center gap-3 pl-2">
-                            {!item.isDirectory && <span className="text-neutral-500 text-xs font-mono">{formatBytes(item.size)}</span>}
-
-                            {!readOnly && onDelete && (
-                                <button onClick={(e) => { e.stopPropagation(); onDelete(item) }} className="text-neutral-500 hover:text-red-400 transition ml-1"><X className="w-4 h-4" /></button>
-                            )}
-
-                            {onDownload && !item.isDirectory && (
-                                <button onClick={() => onDownload(item)} className="text-purple-400 hover:text-white transition ml-1"><Download className="w-4 h-4" /></button>
-                            )}
-                        </div>
-                    </div>
-                );
-            })}
-        </div>
-    )
-}
 
 
 const UploadView = () => {
@@ -1168,7 +1267,9 @@ const UploadView = () => {
     const [contacts, setContacts] = useState<any[]>([]);
     const fileInputRef = useRef<HTMLInputElement>(null);
     const folderInputRef = useRef<HTMLInputElement>(null); // Nieue Ref voor mappen
-    const { notify } = useUI();
+    const { notify, preview, isConfirming, isPreviewing } = useUI();
+
+    useEscapeKey(() => setShowSettings(false), showSettings && !isConfirming && !isPreviewing);
     const [locale, setLocale] = useState('en-GB');
     const [maxLimitLabel, setMaxLimitLabel] = useState('');
 
@@ -1499,17 +1600,18 @@ const UploadView = () => {
                 {/* 4. Buttons - High Z-Index to catch their own clicks */}
                 <div className="relative z-20 flex gap-3 mt-0 pb-6 pointer-events-auto">
                     <button onClick={(e) => { e.stopPropagation(); fileInputRef.current?.click(); }} className="text-xs bg-neutral-800 hover:bg-neutral-700 text-white px-3 py-2 rounded-lg transition border border-neutral-700 cursor-pointer hover:border-purple-500">Select Files</button>
-                    <button onClick={(e) => { e.stopPropagation(); onPickFolder(); }} className="text-xs bg-neutral-800 hover:bg-neutral-700 text-white px-3 py-2 rounded-lg transition border border-neutral-700 flex items-center gap-2 cursor-pointer hover:border-purple-500"><Folder className="w-3 h-3" /> Select Folder</button>
+                    <button onClick={(e) => { e.stopPropagation(); onPickFolder(); }} className="text-xs bg-neutral-800 hover:bg-neutral-700 text-white px-3 py-2 rounded-lg transition border border-neutral-700 flex items-center gap-2 cursor-pointer hover:border-purple-500"><FolderIcon className="w-3 h-3" /> Select Folder</button>
                 </div>
                 {maxLimitLabel && (
-                    <div className="mt-0 px-3 py-1 rounded-full bg-neutral-800 border border-neutral-700 text-xs text-neutral-400 font-medium group-hover:border-purple-500/30 group-hover:text-purple-300 transition-colors">
+                    <div className="mt-0 px-3 py-1 rounded-full bg-neutral-800 border border-neutral-700 text-xs text-neutral-400 font-medium group-hover:border-purple-500/30 group-hover:text-purple-300 transition-colors mb-4 md:mb-0">
                         Max size: {maxLimitLabel}
                     </div>
                 )}
             </div>
 
             {files.length > 0 && (
-                <div className="mt-8 anim-slide bg-neutral-900 rounded-2xl border border-neutral-800 overflow-hidden shadow-xl">
+                <div className="mt-2 anim-slide bg-neutral-900 rounded-2xl border border-neutral-800 overflow-hidden shadow-xl" style={{ "--indent-step": "24px" } as React.CSSProperties}>
+                    <style>{`@media (max-width: 768px) { .anim-slide { --indent-step: 12px !important; } }`}</style>
                     <div className="max-h-[300px] overflow-y-auto">
                         {files.map((item) => {
                             // Calculate depth for indentation
@@ -1519,14 +1621,19 @@ const UploadView = () => {
                             // If it is a folder, it doesn't have a filename at the end, so segments length matches depth closer?
                             // Actually, just using split length - 1 works well if paths are consistent.
                             const depth = Math.max(0, segments.length - 1);
-                            const indent = depth * 24;
+                            // Responsive indentation using CSS variable defined in parent or fallback
+                            // We use style with calc for responsive indent
 
                             return (
-                                <div key={item.id} className={`flex justify-between items-center p-3 md:p-4 border-b border-neutral-800 last:border-0 hover:bg-neutral-800/50 transition gap-2 ${item.isDirectory ? 'bg-neutral-800/30' : ''}`}>
-                                    <div className="flex items-center gap-2 md:gap-4 overflow-hidden flex-1 min-w-0" style={{ paddingLeft: `${indent}px` }}>
+                                <div key={item.id} className={`flex justify-between items-center px-3 py-2 md:px-4 md:py-3 border-b border-neutral-800 last:border-0 hover:bg-neutral-800/50 transition gap-2 ${item.isDirectory ? 'bg-neutral-800/30' : ''}`}>
+                                    <div
+                                        className="flex items-center gap-2 md:gap-4 overflow-hidden flex-1 min-w-0 cursor-pointer"
+                                        style={{ paddingLeft: `calc(${depth} * var(--indent-step, 12px))` }}
+                                        onClick={() => !item.isDirectory && item.file && preview(item.file, item.name)}
+                                    >
                                         <div className="bg-black p-2 rounded-lg flex-shrink-0 relative">
                                             {item.isDirectory ? (
-                                                <Folder className="w-4 h-4 text-purple-400" />
+                                                <FolderIcon className="w-4 h-4 text-purple-400" />
                                             ) : (
                                                 <div className="uppercase text-xs font-bold text-purple-400">{item.name.split('.').pop()}</div>
                                             )}
@@ -1541,6 +1648,13 @@ const UploadView = () => {
                                             )}
                                         </div>
                                     </div>
+                                    <button
+                                        onClick={(e) => { e.stopPropagation(); item.file && preview(item.file, item.name); }}
+                                        className="text-neutral-500 hover:text-white p-2 transition flex-shrink-0 hidden md:block"
+                                        title="Preview"
+                                    >
+                                        <Eye className="w-4 h-4 md:w-5 md:h-5" />
+                                    </button>
                                     <button onClick={(e) => {
                                         e.stopPropagation();
                                         // If removing a directory, maybe remove all children? For now just remove the item.
@@ -1574,113 +1688,128 @@ const UploadView = () => {
                 </div>
             )}
 
-            {showSettings && (
-                <ModalPortal>
-                    <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[9999] flex items-center justify-center p-4 anim-fade">
-                        <div className="bg-neutral-900 w-full max-w-2xl rounded-2xl border border-neutral-700 shadow-2xl p-4 md:p-8 space-y-2 md:space-y-2 anim-scale max-h-[90vh] overflow-y-auto">
-                            <h3 className="text-2xl font-bold text-white flex gap-2 items-center"><Settings className="text-purple-500" /> Share Settings</h3>
+            <AnimatePresence>
+                {showSettings && (
+                    <ModalPortal>
+                        <motion.div
+                            key="settings-modal"
+                            initial={{ opacity: 0, backdropFilter: "blur(0px)" }}
+                            animate={{ opacity: 1, backdropFilter: "blur(4px)" }}
+                            exit={{ opacity: 0, backdropFilter: "blur(0px)" }}
+                            className="fixed inset-0 bg-black/80 z-[9999] flex items-center justify-center p-4"
+                            onClick={() => setShowSettings(false)}
+                        >
+                            <motion.div
+                                initial={{ scale: 0.95, opacity: 0 }}
+                                animate={{ scale: 1, opacity: 1 }}
+                                exit={{ scale: 0.95, opacity: 0 }}
+                                className="bg-neutral-900 w-full max-w-2xl rounded-2xl border border-neutral-700 shadow-2xl p-4 md:p-8 space-y-2 md:space-y-2 max-h-[90vh] overflow-y-auto"
+                                onClick={(e: React.MouseEvent) => e.stopPropagation()}
+                            >
+                                <h3 className="text-2xl font-bold text-white flex gap-2 items-center"><Settings className="text-purple-500" /> Share Settings</h3>
 
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                                <div>
-                                    <label className="text-xs font-bold text-neutral-500 uppercase mb-1 block">Name</label>
-                                    <input className="w-full bg-black border border-neutral-700 rounded-lg p-3 text-white focus:border-purple-500 outline-none transition" value={options.name} onChange={e => setOpts({ ...options, name: e.target.value })} placeholder="Optional" />
-                                </div>
-
-                                {/* ID GENERATOR UI */}
-                                <div>
-                                    <label className="text-xs font-bold text-neutral-500 uppercase mb-1 flex justify-between">
-                                        <span>Unique Link ID</span>
-                                        <span className="text-purple-400">{idLength} characters</span>
-                                    </label>
-                                    <div className="flex gap-2 mb-2">
-                                        <input className="w-full bg-black border border-neutral-700 rounded-lg p-3 text-white focus:border-purple-500 outline-none font-mono text-center tracking-wider" value={options.customSlug} onChange={e => setOpts({ ...options, customSlug: e.target.value })} />
-                                        <button onClick={() => generateId(idLength)} className="bg-neutral-800 hover:bg-neutral-700 p-3 rounded-lg text-white transition" title="Generate new ID">
-                                            <Loader2 className="w-5 h-5" />
-                                        </button>
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                    <div>
+                                        <label className="text-xs font-bold text-neutral-500 uppercase mb-1 block">Name</label>
+                                        <input className="w-full bg-black border border-neutral-700 rounded-lg p-3 text-white focus:border-purple-500 outline-none transition" value={options.name} onChange={e => setOpts({ ...options, name: e.target.value })} placeholder="Optional" />
                                     </div>
-                                    <input
-                                        type="range"
-                                        min="8"
-                                        max="32"
-                                        value={idLength}
-                                        onChange={(e) => {
-                                            const len = parseInt(e.target.value);
-                                            setIdLength(len);
-                                            generateId(len);
-                                        }}
-                                        className="w-full accent-purple-600 h-2 bg-neutral-800 rounded-lg appearance-none cursor-pointer"
-                                    />
-                                </div>
-                            </div>
 
-                            <div><label className="text-xs font-bold text-neutral-500 uppercase mb-1 block">Message</label><textarea className="w-full bg-black border border-neutral-700 rounded-lg p-3 text-white focus:border-purple-500 outline-none transition" rows={2} value={options.message} onChange={e => setOpts({ ...options, message: e.target.value })} /></div>
-
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                                <div><label className="text-xs font-bold text-neutral-500 uppercase mb-1 block">Password</label><input className="w-full bg-black border border-neutral-700 rounded-lg p-3 text-white focus:border-purple-500 outline-none transition" type="password" placeholder="Optional" value={options.password} onChange={e => setOpts({ ...options, password: e.target.value })} /></div>
-                                <div>
-                                    <label className="text-xs font-bold text-neutral-500 uppercase mb-1 block">Expires after</label>
-                                    <div className="flex gap-2">
+                                    {/* ID GENERATOR UI */}
+                                    <div>
+                                        <label className="text-xs font-bold text-neutral-500 uppercase mb-1 flex justify-between">
+                                            <span>Unique Link ID</span>
+                                            <span className="text-purple-400">{idLength} characters</span>
+                                        </label>
+                                        <div className="flex gap-2 mb-2">
+                                            <input className="w-full bg-black border border-neutral-700 rounded-lg p-3 text-white focus:border-purple-500 outline-none font-mono text-center tracking-wider" value={options.customSlug} onChange={e => setOpts({ ...options, customSlug: e.target.value })} />
+                                            <button onClick={() => generateId(idLength)} className="bg-neutral-800 hover:bg-neutral-700 p-3 rounded-lg text-white transition" title="Generate new ID">
+                                                <Loader2 className="w-5 h-5" />
+                                            </button>
+                                        </div>
                                         <input
-                                            type="number" min="0"
-                                            className="w-20 bg-black border border-neutral-700 rounded-lg p-3 text-white focus:border-purple-500 outline-none transition text-center"
-                                            value={options.expirationVal}
-                                            onChange={e => {
-                                                const val = e.target.value;
-                                                setOpts({ ...options, expirationVal: val === '' ? 0 : parseInt(val) })
+                                            type="range"
+                                            min="8"
+                                            max="32"
+                                            value={idLength}
+                                            onChange={(e) => {
+                                                const len = parseInt(e.target.value);
+                                                setIdLength(len);
+                                                generateId(len);
                                             }}
+                                            className="w-full accent-purple-600 h-2 bg-neutral-800 rounded-lg appearance-none cursor-pointer"
                                         />
-                                        <div className="relative flex-1">
-                                            <select
-                                                className="w-full bg-black border border-neutral-700 rounded-lg p-3 text-white appearance-none focus:border-purple-500 outline-none transition pr-10"
-                                                value={options.expirationUnit}
-                                                onChange={e => setOpts({ ...options, expirationUnit: e.target.value })}
-                                            >
-                                                {UNITS.map(u => (
-                                                    <option key={u} value={u}>
-                                                        {getUnitLabel(options.expirationVal, u)}
-                                                    </option>
-                                                ))}
-                                            </select>
-                                            <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-neutral-500 pointer-events-none" />
+                                    </div>
+                                </div>
+
+                                <div><label className="text-xs font-bold text-neutral-500 uppercase mb-1 block">Message</label><textarea className="w-full bg-black border border-neutral-700 rounded-lg p-3 text-white focus:border-purple-500 outline-none transition" rows={2} value={options.message} onChange={e => setOpts({ ...options, message: e.target.value })} /></div>
+
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                    <div><label className="text-xs font-bold text-neutral-500 uppercase mb-1 block">Password</label><input className="w-full bg-black border border-neutral-700 rounded-lg p-3 text-white focus:border-purple-500 outline-none transition" type="password" placeholder="Optional" value={options.password} onChange={e => setOpts({ ...options, password: e.target.value })} /></div>
+                                    <div>
+                                        <label className="text-xs font-bold text-neutral-500 uppercase mb-1 block">Expires after</label>
+                                        <div className="flex gap-2">
+                                            <input
+                                                type="number" min="0"
+                                                className="w-20 bg-black border border-neutral-700 rounded-lg p-3 text-white focus:border-purple-500 outline-none transition text-center"
+                                                value={options.expirationVal}
+                                                onChange={e => {
+                                                    const val = e.target.value;
+                                                    setOpts({ ...options, expirationVal: val === '' ? 0 : parseInt(val) })
+                                                }}
+                                            />
+                                            <div className="relative flex-1">
+                                                <select
+                                                    className="w-full bg-black border border-neutral-700 rounded-lg p-3 text-white appearance-none focus:border-purple-500 outline-none transition pr-10"
+                                                    value={options.expirationUnit}
+                                                    onChange={e => setOpts({ ...options, expirationUnit: e.target.value })}
+                                                >
+                                                    {UNITS.map(u => (
+                                                        <option key={u} value={u}>
+                                                            {getUnitLabel(options.expirationVal, u)}
+                                                        </option>
+                                                    ))}
+                                                </select>
+                                                <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-neutral-500 pointer-events-none" />
+                                            </div>
+                                        </div>
+                                        <div className="text-[10px] text-neutral-500 mt-1.5 flex items-center gap-1.5">
+                                            <Info className="w-3 h-3" />
+                                            {options.expirationVal > 0
+                                                ? <span>Expires on: <span className="text-purple-400">{getFutureDate(options.expirationVal, options.expirationUnit, locale)}</span></span>
+                                                : <span>Link <span className="text-green-500">always remains valid</span></span>
+                                            }
                                         </div>
                                     </div>
-                                    <div className="text-[10px] text-neutral-500 mt-1.5 flex items-center gap-1.5">
-                                        <Info className="w-3 h-3" />
-                                        {options.expirationVal > 0
-                                            ? <span>Expires on: <span className="text-purple-400">{getFutureDate(options.expirationVal, options.expirationUnit, locale)}</span></span>
-                                            : <span>Link <span className="text-green-500">always remains valid</span></span>
-                                        }
+
+                                    <div>
+                                        <label className="text-xs font-bold text-neutral-500 uppercase mb-1 block">Max Downloads (Optional)</label>
+                                        <input
+                                            type="number"
+                                            min="0"
+                                            placeholder="Unlimited"
+                                            className="w-full bg-black border border-neutral-700 rounded-lg p-3 text-white focus:border-purple-500 outline-none transition"
+                                            value={options.maxDownloads || ''}
+                                            onChange={e => setOpts({ ...options, maxDownloads: e.target.value ? parseInt(e.target.value) : undefined })}
+                                        />
+                                        <p className="text-[10px] text-neutral-500 mt-1">Leave empty for unlimited</p>
                                     </div>
                                 </div>
 
                                 <div>
-                                    <label className="text-xs font-bold text-neutral-500 uppercase mb-1 block">Max Downloads (Optional)</label>
-                                    <input
-                                        type="number"
-                                        min="0"
-                                        placeholder="Unlimited"
-                                        className="w-full bg-black border border-neutral-700 rounded-lg p-3 text-white focus:border-purple-500 outline-none transition"
-                                        value={options.maxDownloads || ''}
-                                        onChange={e => setOpts({ ...options, maxDownloads: e.target.value ? parseInt(e.target.value) : undefined })}
-                                    />
-                                    <p className="text-[10px] text-neutral-500 mt-1">Leave empty for unlimited</p>
+                                    <label className="text-xs font-bold text-neutral-500 uppercase mb-1 block">Recipients</label>
+                                    <input className="w-full bg-black border border-neutral-700 rounded-lg p-3 text-white focus:border-purple-500 outline-none transition" placeholder="dan@example.com..." value={options.recipients} onChange={e => setOpts({ ...options, recipients: e.target.value })} list="contacts" />
+                                    <datalist id="contacts">{contacts.map(c => <option key={c.id} value={c.email} />)}</datalist>
                                 </div>
-                            </div>
 
-                            <div>
-                                <label className="text-xs font-bold text-neutral-500 uppercase mb-1 block">Recipients</label>
-                                <input className="w-full bg-black border border-neutral-700 rounded-lg p-3 text-white focus:border-purple-500 outline-none transition" placeholder="dan@example.com..." value={options.recipients} onChange={e => setOpts({ ...options, recipients: e.target.value })} list="contacts" />
-                                <datalist id="contacts">{contacts.map(c => <option key={c.id} value={c.email} />)}</datalist>
-                            </div>
-
-                            <div className="flex justify-end gap-3 pt-4 border-t border-neutral-800">
-                                <button onClick={() => setShowSettings(false)} className="text-neutral-400 hover:text-white px-4 py-2 transition">Cancel</button>
-                                <button onClick={handleUpload} disabled={uploading} className="bg-gradient-to-br from-purple-600 to-blue-600 hover:brightness-90 px-8 py-3 rounded-lg text-white font-bold transition btn-press shadow-lg shadow-purple-900/20">{uploading ? 'In progress...' : 'Send'}</button>
-                            </div>
-                        </div>
-                    </div>
-                </ModalPortal>
-            )}
+                                <div className="flex justify-end gap-3 pt-4 border-t border-neutral-800">
+                                    <button onClick={() => setShowSettings(false)} className="text-neutral-400 hover:text-white px-4 py-2 transition">Cancel</button>
+                                    <button onClick={handleUpload} disabled={uploading} className="bg-gradient-to-br from-purple-600 to-blue-600 hover:brightness-90 px-8 py-3 rounded-lg text-white font-bold transition btn-press shadow-lg shadow-purple-900/20">{uploading ? 'In progress...' : 'Send'}</button>
+                                </div>
+                            </motion.div>
+                        </motion.div>
+                    </ModalPortal>
+                )}
+            </AnimatePresence>
         </div>
     );
 };
@@ -1693,7 +1822,11 @@ const MySharesView = () => {
     const [isSaving, setIsSaving] = useState(false);
     const [resending, setResending] = useState<any>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
-    const { notify, confirm } = useUI();
+    const { notify, confirm, preview, isConfirming, isPreviewing } = useUI();
+
+    // Esc keys
+    useEscapeKey(() => setEditing(null), !!editing && !isConfirming && !isPreviewing);
+    useEscapeKey(() => setResending(null), !!resending && !isConfirming && !isPreviewing);
 
     useEffect(() => { load(); }, []);
     const load = async () => {
@@ -1747,13 +1880,88 @@ const MySharesView = () => {
         });
     };
 
-    const saveEdit = async () => {
-        setIsSaving(true);
+    const [stagedFiles, setStagedFiles] = useState<any[]>([]); // { tempId, originalName, size, mimeType }
+    const [isStaging, setIsStaging] = useState(false);
+
+    // Als we een edit openen, reset staged
+    useEffect(() => {
+        if (editing) {
+            setStagedFiles([]);
+        }
+    }, [editing?.id]);
+
+    const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+        if (!e.target.files || e.target.files.length === 0) return;
+        setIsStaging(true);
         setEditProgress(0);
 
+        const files = Array.from(e.target.files);
+        // We gebruiken de bestaande chunked upload logica, maar naar de 'stage' endpoint
+
         try {
-            // STAP 1: Metadata updaten (Naam, Password, Slug, etc.)
-            // Dit blijft een normale PUT request, maar we sturen GEEN bestanden mee hier
+            const configRes = await fetch(`${API_URL}/config`, { credentials: 'include' });
+            const config = await configRes.json();
+            const k = 1024;
+            const map: any = { 'KB': k, 'MB': k * k };
+            const CHUNK_SIZE = (config.chunkSizeVal || 50) * (map[config.chunkSizeUnit || 'MB'] || k * k);
+
+            const uploadedFilesMeta = [];
+            let totalBytes = files.reduce((acc, f) => acc + f.size, 0);
+            let uploadedBytes = 0;
+
+            for (const file of files) {
+                const fileId = generateUUID();
+                const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+
+                for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
+                    const start = chunkIndex * CHUNK_SIZE;
+                    const end = Math.min(start + CHUNK_SIZE, file.size);
+                    const chunk = file.slice(start, end);
+
+                    const chunkFd = new FormData();
+                    chunkFd.append('chunk', chunk);
+                    chunkFd.append('chunkIndex', chunkIndex.toString());
+                    chunkFd.append('totalChunks', totalChunks.toString());
+                    chunkFd.append('fileName', file.name);
+                    chunkFd.append('fileId', fileId);
+
+                    await axios.post(`${API_URL}/shares/${editing.id}/chunk`, chunkFd);
+
+                    uploadedBytes += chunk.size;
+                    setEditProgress(Math.round((uploadedBytes * 100) / totalBytes));
+                }
+
+                uploadedFilesMeta.push({
+                    fileName: file.name,
+                    fileId: fileId,
+                    size: file.size,
+                    mimeType: file.type
+                });
+            }
+
+            // Call STAGE endpoint
+            const res = await axios.post(`${API_URL}/shares/${editing.id}/stage`, {
+                files: uploadedFilesMeta
+            });
+
+            if (res.data.success) {
+                setStagedFiles(prev => [...prev, ...res.data.stagedFiles]);
+                notify("Files scanned & ready to save", "success");
+            }
+
+        } catch (e: any) {
+            console.error(e);
+            notify(e.response?.data?.error || e.message || 'Scan failed', "error");
+        } finally {
+            setIsStaging(false);
+            setEditProgress(0);
+            if (fileInputRef.current) fileInputRef.current.value = '';
+        }
+    };
+
+    const saveEdit = async () => {
+        setIsSaving(true);
+        try {
             const fd = new FormData();
             fd.append('name', editing.name);
 
@@ -1766,11 +1974,14 @@ const MySharesView = () => {
 
             if (editing.newSlug) fd.append('customSlug', editing.newSlug);
 
-            // Stuur alleen een nieuwe datum als de gebruiker het veld daadwerkelijk heeft aangeraakt.
-            // Anders negeren we het en behoudt de backend de oude datum.
             if (editing.newExpirationVal !== undefined && editing.newExpirationVal !== null && !isNaN(editing.newExpirationVal)) {
                 fd.append('expirationVal', editing.newExpirationVal.toString());
                 fd.append('expirationUnit', editing.newExpirationUnit || 'Days');
+            }
+
+            // Add Staged Files
+            if (stagedFiles.length > 0) {
+                fd.append('staged_files', JSON.stringify(stagedFiles));
             }
 
             // Update metadata
@@ -1780,62 +1991,11 @@ const MySharesView = () => {
                 body: fd
             });
 
-            if (!res.ok) throw new Error('Metadata update failed');
-            const data = await res.json();
-            const targetId = data.newId || editing.id; // ID kan veranderd zijn (custom slug)
-
-            // STAP 2: Chunked Upload voor nieuwe bestanden (als die er zijn)
-            if (newFiles.length > 0) {
-                // Config ophalen voor chunk size
-                const configRes = await fetch(`${API_URL}/config`, { credentials: 'include' });
-                const config = await configRes.json();
-                const k = 1024;
-                const map: any = { 'KB': k, 'MB': k * k };
-                const CHUNK_SIZE = (config.chunkSizeVal || 50) * (map[config.chunkSizeUnit || 'MB'] || k * k);
-
-                const uploadedFilesMeta = [];
-                let totalBytes = newFiles.reduce((acc, f) => acc + f.size, 0);
-                let uploadedBytes = 0;
-
-                for (const file of newFiles) {
-                    const fileId = generateUUID();
-                    const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
-
-                    for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
-                        const start = chunkIndex * CHUNK_SIZE;
-                        const end = Math.min(start + CHUNK_SIZE, file.size);
-                        const chunk = file.slice(start, end);
-
-                        const chunkFd = new FormData();
-                        chunkFd.append('chunk', chunk);
-                        chunkFd.append('chunkIndex', chunkIndex.toString());
-                        chunkFd.append('totalChunks', totalChunks.toString());
-                        chunkFd.append('fileName', file.name);
-                        chunkFd.append('fileId', fileId);
-
-                        await axios.post(`${API_URL}/shares/${targetId}/chunk`, chunkFd);
-
-                        uploadedBytes += chunk.size;
-                        setEditProgress(Math.round((uploadedBytes * 100) / totalBytes));
-                    }
-
-                    uploadedFilesMeta.push({
-                        fileName: file.name,
-                        originalName: file.name,
-                        fileId: fileId,
-                        size: file.size,
-                        mimeType: file.type
-                    });
-                }
-
-                // Finalize aanroepen om bestanden definitief te maken
-                await axios.post(`${API_URL}/shares/${targetId}/finalize`, {
-                    files: uploadedFilesMeta
-                });
-            }
+            const json = await res.json();
+            if (!res.ok) throw new Error(json.error || 'Metadata update failed');
 
             setEditing(null);
-            setNewFiles([]);
+            setStagedFiles([]);
             load();
             notify("Changes saved", "success");
 
@@ -1844,7 +2004,6 @@ const MySharesView = () => {
             notify(e.message || 'Update failed', "error");
         } finally {
             setIsSaving(false);
-            setEditProgress(0);
         }
     };
 
@@ -1870,7 +2029,7 @@ const MySharesView = () => {
                 {shares.map(s => (
                     <div key={s.id} className="bg-neutral-900 rounded-xl border border-neutral-800 p-4 md:p-6 flex flex-col md:flex-row justify-between items-start gap-4 hover:border-neutral-600 transition duration-300">
                         <div className="flex-1 min-w-0">
-                            <h3 className="text-lg md:text-xl font-bold text-white flex items-center gap-2 flex-wrap">{s.name} {s.protected && <Lock className="w-4 h-4 text-yellow-500" />}</h3>
+                            <h3 className="text-lg md:text-xl font-bold text-white flex items-center gap-2 flex-wrap">{s.name} {s.protected && <LockIcon className="w-4 h-4 text-yellow-500" />}</h3>
                             <div className="text-neutral-400 text-xs md:text-sm mt-1 flex gap-2 md:gap-3 flex-wrap">
                                 <span>{s.files?.length || 0} files</span>
                                 <span>•</span>
@@ -1913,185 +2072,275 @@ const MySharesView = () => {
                 ))}
             </div>
 
-            {editing && (
-                <ModalPortal>
-                    <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[9999] flex items-center justify-center p-4 anim-fade">
-                        <div className="bg-neutral-900 w-full max-w-2xl rounded-2xl border border-neutral-700 shadow-2xl p-4 md:p-8 space-y-4 md:space-y-6 anim-scale max-h-[90vh] overflow-y-auto">
+            <AnimatePresence>
+                {editing && (
+                    <ModalPortal>
+                        <motion.div
+                            key="edit-modal"
+                            initial={{ opacity: 0, backdropFilter: "blur(0px)" }}
+                            animate={{ opacity: 1, backdropFilter: "blur(8px)" }}
+                            exit={{ opacity: 0, backdropFilter: "blur(0px)" }}
+                            transition={{ duration: 0.2 }}
+                            className="fixed inset-0 bg-black/80 z-[9999] flex items-center justify-center p-4 text-left"
+                            onClick={() => !isSaving && setEditing(null)}
+                        >
+                            <motion.div
+                                initial={{ scale: 0.95, opacity: 0, y: 20 }}
+                                animate={{ scale: 1, opacity: 1, y: 0 }}
+                                exit={{ scale: 0.95, opacity: 0, y: 20 }}
+                                onClick={(e: React.MouseEvent) => e.stopPropagation()}
+                                className="bg-neutral-900 w-full max-w-2xl rounded-2xl border border-neutral-700 shadow-2xl p-4 md:p-8 space-y-4 md:space-y-6 max-h-[90vh] overflow-y-auto"
+                            >
+                                <h3 className="text-2xl font-bold text-white flex gap-2 items-center"><Edit className="text-purple-500" /> Edit Share</h3>
 
-                            <h3 className="text-2xl font-bold text-white flex gap-2 items-center"><Edit className="text-purple-500" /> Edit Share</h3>
+                                {/* Naam & Link */}
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                    <div><label className="text-xs font-bold text-neutral-500 uppercase mb-1 block">Name</label><input className="w-full bg-black border border-neutral-700 rounded-lg p-3 text-white focus:border-purple-500 outline-none transition" value={editing.name} onChange={e => setEditing({ ...editing, name: e.target.value })} /></div>
+                                    <div><label className="text-xs font-bold text-neutral-500 uppercase mb-1 block">Link / ID</label><input className="w-full bg-black border border-neutral-700 rounded-lg p-3 text-white focus:border-purple-500 outline-none transition" defaultValue={editing.id} onChange={e => setEditing({ ...editing, newSlug: e.target.value })} /></div>
+                                </div>
 
-                            {/* Naam & Link */}
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                                <div><label className="text-xs font-bold text-neutral-500 uppercase mb-1 block">Name</label><input className="w-full bg-black border border-neutral-700 rounded-lg p-3 text-white focus:border-purple-500 outline-none transition" value={editing.name} onChange={e => setEditing({ ...editing, name: e.target.value })} /></div>
-                                <div><label className="text-xs font-bold text-neutral-500 uppercase mb-1 block">Link / ID</label><input className="w-full bg-black border border-neutral-700 rounded-lg p-3 text-white focus:border-purple-500 outline-none transition" defaultValue={editing.id} onChange={e => setEditing({ ...editing, newSlug: e.target.value })} /></div>
-                            </div>
-
-                            {/* Password & Expiration */}
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                                <div>
-                                    <label className="text-xs font-bold text-neutral-500 uppercase mb-1 block">Password</label>
-                                    <div className="relative">
-                                        <input
-                                            className="w-full bg-black border border-neutral-700 rounded-lg p-3 text-white focus:border-purple-500 outline-none transition pr-10"
-                                            type="password"
-                                            autoComplete="current-password"
-                                            placeholder={editing.protected ? "Password set (type to change)" : "Leave blank for no change"}
-                                            onChange={e => setEditing({ ...editing, password: e.target.value, removePassword: false })}
-                                        />
-                                        {editing.protected && !editing.removePassword && (
-                                            <button
-                                                type="button"
-                                                onClick={() => setEditing({ ...editing, protected: false, removePassword: true, password: '' })}
-                                                className="absolute right-3 top-1/2 -translate-y-1/2 text-neutral-400 hover:text-red-500 transition-colors p-1 rounded-md hover:bg-neutral-800"
-                                                title="Delete password"
-                                            >
-                                                <X className="w-5 h-5" />
-                                            </button>
+                                {/* Password & Expiration */}
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                    <div>
+                                        <label className="text-xs font-bold text-neutral-500 uppercase mb-1 block">Password</label>
+                                        <div className="relative">
+                                            <input
+                                                className="w-full bg-black border border-neutral-700 rounded-lg p-3 text-white focus:border-purple-500 outline-none transition pr-10"
+                                                type="password"
+                                                autoComplete="current-password"
+                                                placeholder={editing.protected ? "Password set (type to change)" : "Leave blank for no change"}
+                                                onChange={e => setEditing({ ...editing, password: e.target.value, removePassword: false })}
+                                            />
+                                            {editing.protected && !editing.removePassword && (
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setEditing({ ...editing, protected: false, removePassword: true, password: '' })}
+                                                    className="absolute right-3 top-1/2 -translate-y-1/2 text-neutral-400 hover:text-red-500 transition-colors p-1 rounded-md hover:bg-neutral-800"
+                                                    title="Delete password"
+                                                >
+                                                    <X className="w-5 h-5" />
+                                                </button>
+                                            )}
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <label className="text-xs font-bold text-neutral-500 uppercase mb-1 block">New Expiry Time</label>
+                                        <div className="flex gap-2">
+                                            <input
+                                                type="number" min="0" placeholder="-"
+                                                className="w-20 bg-black border border-neutral-700 rounded-lg p-3 text-white focus:border-purple-500 outline-none transition text-center"
+                                                value={editing.newExpirationVal ?? ''}
+                                                onChange={e => {
+                                                    const val = e.target.value;
+                                                    setEditing({
+                                                        ...editing,
+                                                        // Als leeg, maak 0. Anders parseInt.
+                                                        newExpirationVal: val === '' ? 0 : parseInt(val),
+                                                        newExpirationUnit: editing.newExpirationUnit || 'Days'
+                                                    });
+                                                }}
+                                            />
+                                            <div className="relative flex-1">
+                                                <select
+                                                    className="w-full bg-black border border-neutral-700 rounded-lg p-3 text-white appearance-none focus:border-purple-500 outline-none transition pr-10"
+                                                    value={editing.newExpirationUnit || 'Days'}
+                                                    onChange={e => setEditing({ ...editing, newExpirationUnit: e.target.value })}
+                                                >
+                                                    {UNITS.map(u => (
+                                                        <option key={u} value={u}>
+                                                            {getUnitLabel(editing.newExpirationVal || 1, u)}
+                                                        </option>
+                                                    ))}
+                                                </select>
+                                                <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-neutral-500 pointer-events-none" />
+                                            </div>
+                                        </div>
+                                        {editing.newExpirationVal !== undefined && !isNaN(editing.newExpirationVal) && (
+                                            <p className="text-[10px] text-neutral-500 mt-1">
+                                                New date: <span className="text-purple-400">{getFutureDate(editing.newExpirationVal, editing.newExpirationUnit || 'Days')}</span>
+                                            </p>
                                         )}
                                     </div>
                                 </div>
+
+                                {/* Bestanden */}
                                 <div>
-                                    <label className="text-xs font-bold text-neutral-500 uppercase mb-1 block">New Expiry Time</label>
-                                    <div className="flex gap-2">
-                                        <input
-                                            type="number" min="0" placeholder="-"
-                                            className="w-20 bg-black border border-neutral-700 rounded-lg p-3 text-white focus:border-purple-500 outline-none transition text-center"
-                                            value={editing.newExpirationVal ?? ''}
-                                            onChange={e => {
-                                                const val = e.target.value;
-                                                setEditing({
-                                                    ...editing,
-                                                    // Als leeg, maak 0. Anders parseInt.
-                                                    newExpirationVal: val === '' ? 0 : parseInt(val),
-                                                    newExpirationUnit: editing.newExpirationUnit || 'Days'
-                                                });
-                                            }}
-                                        />
-                                        <div className="relative flex-1">
-                                            <select
-                                                className="w-full bg-black border border-neutral-700 rounded-lg p-3 text-white appearance-none focus:border-purple-500 outline-none transition pr-10"
-                                                value={editing.newExpirationUnit || 'Days'}
-                                                onChange={e => setEditing({ ...editing, newExpirationUnit: e.target.value })}
-                                            >
-                                                {UNITS.map(u => (
-                                                    <option key={u} value={u}>
-                                                        {getUnitLabel(editing.newExpirationVal || 1, u)}
-                                                    </option>
-                                                ))}
-                                            </select>
-                                            <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-neutral-500 pointer-events-none" />
+                                    <label className="text-xs font-bold text-neutral-500 uppercase mb-1 block">Files</label>
+
+                                    {/* Hierarchical File Tree */}
+                                    {(() => {
+                                        const dbItems: UploadItem[] = (editing.files || []).map((f: any) => ({
+                                            file: null,
+                                            path: f.original_name,
+                                            name: f.original_name.split('/').pop() || f.original_name,
+                                            id: f.id,
+                                            isDirectory: false,
+                                            size: f.size
+                                        }));
+                                        const stagedItems: UploadItem[] = stagedFiles.map(f => ({
+                                            file: null, // It's on server now
+                                            path: f.originalName,
+                                            name: f.originalName,
+                                            id: f.tempId, // Use tempId for identification
+                                            isDirectory: false,
+                                            size: f.size,
+                                            isStaged: true // Vlaggetje om te weten dat hij staged is
+                                        }));
+
+                                        // Sort and synthesize tree
+                                        const combined = sortFiles(synthesizeDirectoryItems([...dbItems, ...stagedItems]));
+
+                                        return (
+                                            <div className="bg-neutral-800/50 rounded-lg border border-neutral-700 overflow-hidden max-h-[300px] overflow-y-auto" style={{ "--indent-step": "24px" } as React.CSSProperties}>
+                                                <style>{`@media (max-width: 768px) { [style*="--indent-step"] { --indent-step: 12px !important; } }`}</style>
+                                                {combined.length === 0 ? (
+                                                    <p className="text-center text-neutral-500 py-8">No files in this share.</p>
+                                                ) : (
+                                                    combined.map((item: any) => {
+                                                        const segments = item.path.split('/');
+                                                        const depth = Math.max(0, segments.length - 1);
+
+                                                        return (
+                                                            <div key={item.id} className={`flex justify-between items-center px-3 py-2 border-b border-neutral-700 last:border-0 hover:bg-neutral-700/50 transition gap-2 ${item.isDirectory ? 'bg-neutral-700/30' : ''}`}>
+                                                                <div
+                                                                    className="flex items-center gap-2 md:gap-4 overflow-hidden flex-1 cursor-pointer"
+                                                                    style={{ paddingLeft: `calc(${depth} * var(--indent-step, 12px))` }}
+                                                                    onClick={() => {
+                                                                        if (item.isDirectory) return;
+                                                                        if (item.isStaged) {
+                                                                            preview(`${API_URL}/shares/preview-stage/${item.id}`, item.name);
+                                                                        } else {
+                                                                            preview(`${API_URL}/shares/${editing.id}/files/${item.id}`, item.name);
+                                                                        }
+                                                                    }}
+                                                                >
+                                                                    <div className="bg-black p-2 rounded-lg text-purple-400 font-bold text-xs uppercase text-center shrink-0 flex items-center justify-center min-w-[2.5rem]">
+                                                                        {item.isDirectory ? <FolderIcon className="w-4 h-4" /> : item.name.split('.').pop()}
+                                                                        {depth > 0 && <div className="absolute -left-3 top-1/2 -translate-y-1/2 w-2 h-[1px] bg-neutral-600"></div>}
+                                                                    </div>
+                                                                    <div className="min-w-0">
+                                                                        <p className={`font-medium truncate ${item.isDirectory ? 'text-purple-300' : 'text-neutral-200'}`}>
+                                                                            {item.name} {item.isStaged && <span className="text-[10px] bg-green-900/50 text-green-400 px-1.5 py-0.5 rounded ml-2 border border-green-800">New</span>}
+                                                                        </p>
+                                                                        {!item.isDirectory && <p className="text-xs text-neutral-500">{formatBytes(item.size)}</p>}
+                                                                    </div>
+                                                                </div>
+
+                                                                <div className="flex items-center gap-1">
+                                                                    {!item.isDirectory && (
+                                                                        <button
+                                                                            onClick={(e) => {
+                                                                                e.stopPropagation();
+                                                                                if (item.isStaged) {
+                                                                                    setStagedFiles(prev => prev.filter(p => p.tempId !== item.id));
+                                                                                } else {
+                                                                                    deleteFile(editing.id, item.id);
+                                                                                }
+                                                                            }}
+                                                                            className="p-2 text-neutral-500 hover:text-red-400 hover:bg-red-500/10 rounded transition"
+                                                                        >
+                                                                            <X className="w-4 h-4" />
+                                                                        </button>
+                                                                    )}
+                                                                </div>
+                                                            </div>
+                                                        );
+                                                    })
+                                                )}
+                                            </div>
+                                        );
+                                    })()}
+
+                                    {isStaging && (
+                                        <div className="mt-2">
+                                            <div className="flex justify-between text-xs text-neutral-400 mb-1">
+                                                <span>Scanning & Staging files...</span>
+                                                <span>{editProgress}%</span>
+                                            </div>
+                                            <div className="w-full bg-neutral-800 rounded-full h-1.5">
+                                                <div className="bg-green-500 h-1.5 rounded-full transition-all duration-300" style={{ width: `${editProgress}%` }}></div>
+                                            </div>
                                         </div>
-                                    </div>
-                                    {editing.newExpirationVal !== undefined && !isNaN(editing.newExpirationVal) && (
-                                        <p className="text-[10px] text-neutral-500 mt-1">
-                                            New date: <span className="text-purple-400">{getFutureDate(editing.newExpirationVal, editing.newExpirationUnit || 'Days')}</span>
-                                        </p>
                                     )}
+
+                                    <div className="mt-4 flex gap-2">
+                                        <button onClick={() => fileInputRef.current?.click()} className="bg-neutral-800 hover:bg-neutral-700 text-white px-4 py-2 rounded-lg text-sm font-medium transition border border-neutral-700 flex items-center gap-2">
+                                            <Plus className="w-4 h-4" /> Add Files
+                                        </button>
+
+                                        <input
+                                            ref={fileInputRef}
+                                            type="file"
+                                            multiple
+                                            className="hidden"
+                                            onChange={handleFileSelect}
+                                        />
+                                    </div>
                                 </div>
-                            </div>
 
-                            {/* Bestanden */}
-                            <div>
-                                <label className="text-xs font-bold text-neutral-500 uppercase mb-1 block">Files</label>
-
-                                {/* Hierarchical File Tree */}
-                                {(() => {
-                                    const dbItems: UploadItem[] = (editing.files || []).map((f: any) => ({
-                                        file: null,
-                                        path: f.original_name,
-                                        name: f.original_name.split('/').pop() || f.original_name,
-                                        id: f.id,
-                                        isDirectory: false,
-                                        size: f.size
-                                    }));
-                                    const newItems: UploadItem[] = newFiles.map(f => ({
-                                        file: f,
-                                        path: f.webkitRelativePath || f.name,
-                                        name: f.name,
-                                        id: 'temp-' + f.name + '-' + f.size,
-                                        isDirectory: false,
-                                        size: f.size
-                                    }));
-                                    const treeFiles = sortFiles(synthesizeDirectoryItems([...dbItems, ...newItems]));
-
-                                    return (
-                                        <div className="mb-2">
-                                            <FileTreeList
-                                                files={treeFiles}
-                                                onDelete={(item) => {
-                                                    if (item.isDirectory) {
-                                                        notify("To maintain integrity, please delete files individually.", "info");
-                                                        return;
-                                                    }
-                                                    if (String(item.id).startsWith('temp-')) {
-                                                        if (item.file) setNewFiles(newFiles.filter(f => f !== item.file));
-                                                    } else {
-                                                        deleteFile(editing.id, item.id);
-                                                    }
-                                                }}
-                                                onDownload={(item) => {
-                                                    if (String(item.id).startsWith('temp-')) {
-                                                        notify("Please save changes before downloading new files.", "info");
-                                                    } else {
-                                                        window.open(`${API_URL}/shares/${editing.id}/files/${item.id}`, '_blank');
-                                                    }
-                                                }}
-                                            />
+                                {/* Progress Bar (Alleen zichtbaar tijdens Save) */}
+                                {isSaving && (
+                                    <div className="mt-4">
+                                        <div className="flex justify-between text-xs text-neutral-400 mb-1">
+                                            <span>{newFiles.length > 0 ? 'Uploading files...' : 'Save...'}</span>
+                                            <span>{editProgress}%</span>
                                         </div>
-                                    );
-                                })()}
-
-                                <button onClick={() => fileInputRef.current?.click()} className="text-purple-400 hover:text-white text-sm font-bold flex items-center gap-2 transition"><Plus className="w-4 h-4" /> Add Files</button>
-                                <input ref={fileInputRef} type="file" multiple className="hidden" onChange={e => setNewFiles([...newFiles, ...Array.from((e.target.files) as FileList)])} />
-                            </div>
-
-                            {/* Progress Bar (Alleen zichtbaar tijdens Save) */}
-                            {isSaving && (
-                                <div className="mt-4">
-                                    <div className="flex justify-between text-xs text-neutral-400 mb-1">
-                                        <span>{newFiles.length > 0 ? 'Uploading files...' : 'Save...'}</span>
-                                        <span>{editProgress}%</span>
+                                        <div className="w-full bg-neutral-800 rounded-full h-2 overflow-hidden">
+                                            <div
+                                                className="bg-gradient-to-r from-purple-600 to-purple-400 h-2 rounded-full transition-all duration-300"
+                                                style={{ width: `${newFiles.length > 0 ? editProgress : 100}%` }}
+                                            ></div>
+                                        </div>
                                     </div>
-                                    <div className="w-full bg-neutral-800 rounded-full h-2 overflow-hidden">
-                                        <div
-                                            className="bg-gradient-to-r from-purple-600 to-purple-400 h-2 rounded-full transition-all duration-300"
-                                            style={{ width: `${newFiles.length > 0 ? editProgress : 100}%` }}
-                                        ></div>
-                                    </div>
+                                )}
+
+                                {/* Actieknoppen */}
+                                <div className="flex justify-end gap-3 pt-4 border-t border-neutral-700 mt-4">
+                                    <button onClick={() => { setEditing(null); setNewFiles([]) }} disabled={isSaving} className="text-neutral-400 hover:text-white px-4 py-2 transition">Cancel</button>
+                                    <button onClick={saveEdit} disabled={isSaving} className="bg-gradient-to-br from-purple-600 to-blue-600 hover:brightness-90 px-6 py-2 rounded-lg text-white font-bold transition btn-press flex items-center gap-2">
+                                        {isSaving && <Loader2 className="w-4 h-4 animate-spin" />}
+                                        Save
+                                    </button>
                                 </div>
-                            )}
 
-                            {/* Actieknoppen */}
-                            <div className="flex justify-end gap-3 pt-4 border-t border-neutral-700 mt-4">
-                                <button onClick={() => { setEditing(null); setNewFiles([]) }} disabled={isSaving} className="text-neutral-400 hover:text-white px-4 py-2 transition">Cancel</button>
-                                <button onClick={saveEdit} disabled={isSaving} className="bg-gradient-to-br from-purple-600 to-blue-600 hover:brightness-90 px-6 py-2 rounded-lg text-white font-bold transition btn-press flex items-center gap-2">
-                                    {isSaving && <Loader2 className="w-4 h-4 animate-spin" />}
-                                    Save
-                                </button>
-                            </div>
+                            </motion.div>
+                        </motion.div>
+                    </ModalPortal>
+                )}
+            </AnimatePresence>
 
-                        </div>
-                    </div>
-                </ModalPortal>
-            )}
-
-            {resending && (
-                <ModalPortal>
-                    <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[9999] flex items-center justify-center p-4 anim-fade">
-                        <div className="bg-neutral-900 w-full max-w-lg rounded-2xl border border-neutral-700 p-4 md:p-8 anim-scale shadow-2xl">
-                            <h3 className="text-xl font-bold text-white mb-6 flex gap-2 items-center"><Mail className="text-purple-500" /> Resend mail</h3>
-                            <div className="space-y-4">
-                                <div><label className="text-xs font-bold text-neutral-500 uppercase mb-1 block">Recipients</label><input className="w-full bg-black border border-neutral-700 rounded-lg p-3 text-white focus:border-purple-500 outline-none" value={resending.recipients || ''} onChange={e => setResending({ ...resending, recipients: e.target.value })} /></div>
-                                <div><label className="text-xs font-bold text-neutral-500 uppercase mb-1 block">Message</label><textarea className="w-full bg-black border border-neutral-700 rounded-lg p-3 text-white focus:border-purple-500 outline-none" rows={4} value={resending.message || ''} onChange={e => setResending({ ...resending, message: e.target.value })} /></div>
-                            </div>
-                            <div className="flex justify-end gap-3 mt-6 border-t border-neutral-700 pt-4">
-                                <button onClick={() => setResending(null)} className="text-neutral-400 hover:text-white px-4 py-2 transition">Cancel</button>
-                                <button onClick={submitResend} className="bg-gradient-to-br from-purple-600 to-blue-600 hover:brightness-90 px-6 py-2 rounded-lg text-white font-bold transition btn-press flex items-center gap-2"><Send className="w-4 h-4" /> Send</button>
-                            </div>
-                        </div>
-                    </div>
-                </ModalPortal>
-            )}
+            <AnimatePresence>
+                {resending && (
+                    <ModalPortal>
+                        <motion.div
+                            key="resend-modal"
+                            initial={{ opacity: 0, backdropFilter: "blur(0px)" }}
+                            animate={{ opacity: 1, backdropFilter: "blur(4px)" }}
+                            exit={{ opacity: 0, backdropFilter: "blur(0px)" }}
+                            className="fixed inset-0 bg-black/80 z-[9999] flex items-center justify-center p-4"
+                            onClick={() => setResending(null)}
+                        >
+                            <motion.div
+                                initial={{ scale: 0.95, opacity: 0 }}
+                                animate={{ scale: 1, opacity: 1 }}
+                                exit={{ scale: 0.95, opacity: 0 }}
+                                onClick={(e: React.MouseEvent) => e.stopPropagation()}
+                                className="bg-neutral-900 w-full max-w-lg rounded-2xl border border-neutral-700 p-4 md:p-8 shadow-2xl"
+                            >
+                                <h3 className="text-xl font-bold text-white mb-6 flex gap-2 items-center"><Mail className="text-purple-500" /> Resend mail</h3>
+                                <div className="space-y-4">
+                                    <div><label className="text-xs font-bold text-neutral-500 uppercase mb-1 block">Recipients</label><input className="w-full bg-black border border-neutral-700 rounded-lg p-3 text-white focus:border-purple-500 outline-none" value={resending.recipients || ''} onChange={e => setResending({ ...resending, recipients: e.target.value })} /></div>
+                                    <div><label className="text-xs font-bold text-neutral-500 uppercase mb-1 block">Message</label><textarea className="w-full bg-black border border-neutral-700 rounded-lg p-3 text-white focus:border-purple-500 outline-none" rows={4} value={resending.message || ''} onChange={e => setResending({ ...resending, message: e.target.value })} /></div>
+                                </div>
+                                <div className="flex justify-end gap-3 mt-6 border-t border-neutral-700 pt-4">
+                                    <button onClick={() => setResending(null)} className="text-neutral-400 hover:text-white px-4 py-2 transition">Cancel</button>
+                                    <button onClick={submitResend} className="bg-gradient-to-br from-purple-600 to-blue-600 hover:brightness-90 px-6 py-2 rounded-lg text-white font-bold transition btn-press flex items-center gap-2"><Send className="w-4 h-4" /> Send</button>
+                                </div>
+                            </motion.div>
+                        </motion.div>
+                    </ModalPortal>
+                )}
+            </AnimatePresence>
         </div>
     );
 };
@@ -2116,7 +2365,11 @@ const ReverseView = () => {
     });
     const [idLength, setIdLength] = useState(12);
     const [copiedId, setCopiedId] = useState<string | null>(null);
-    const { notify, confirm } = useUI();
+    const { notify, confirm, preview, isConfirming, isPreviewing } = useUI();
+
+    // Esc keys
+    useEscapeKey(() => setCreateMode(false), createMode && !isConfirming && !isPreviewing);
+    useEscapeKey(() => setViewFiles(null), !!viewFiles && !isConfirming && !isPreviewing);
 
     useEffect(() => {
         load();
@@ -2214,16 +2467,17 @@ const ReverseView = () => {
             <div className="bg-neutral-900 rounded-xl border border-neutral-800 p-6 anim-scale">
                 <div className="flex justify-between items-center mb-6"><h3 className="text-xl font-bold text-white flex gap-2"><Download className="text-purple-500" /> Received Files</h3><button onClick={() => setViewFiles(null)} className="text-neutral-400 hover:text-white transition">Back</button></div>
                 {uploadedFiles.length === 0 ? <p className="text-neutral-500">Nothing uploaded yet.</p> : (
-                    <div className="space-y-2 max-h-[500px] overflow-y-auto bg-black/30 rounded-lg border border-neutral-800">
+                    <div className="max-h-[500px] overflow-y-auto bg-black/30 rounded-lg border border-neutral-800" style={{ "--indent-step": "24px" } as React.CSSProperties}>
+                        <style>{`@media (max-width: 768px) { [style*="--indent-step"] { --indent-step: 12px !important; } }`}</style>
                         {treeItems.map(item => {
                             const segments = item.path.split('/');
                             const depth = Math.max(0, segments.length - 1);
-                            const indent = depth * 24;
+
                             return (
-                                <div key={item.id} className={`flex justify-between items-center p-3 last:border-0 hover:bg-neutral-800/50 transition gap-2 ${item.isDirectory ? 'bg-neutral-800/30' : ''}`}>
-                                    <div className="flex items-center gap-2 md:gap-4 overflow-hidden flex-1 min-w-0" style={{ paddingLeft: `${indent}px` }}>
+                                <div key={item.id} className={`flex justify-between items-center px-3 py-2 last:border-0 hover:bg-neutral-800/50 transition gap-2 ${item.isDirectory ? 'bg-neutral-800/30' : ''}`}>
+                                    <div className="flex items-center gap-2 md:gap-4 overflow-hidden flex-1 min-w-0" style={{ paddingLeft: `calc(${depth} * var(--indent-step, 12px))` }}>
                                         <div className="bg-black p-2 rounded-lg flex-shrink-0 relative">
-                                            {item.isDirectory ? <Folder className="w-4 h-4 text-purple-400" /> : <div className="uppercase text-xs font-bold text-purple-400">{item.name.split('.').pop()}</div>}
+                                            {item.isDirectory ? <FolderIcon className="w-4 h-4 text-purple-400" /> : <div className="uppercase text-xs font-bold text-purple-400 min-w-[2.5rem] w-auto text-center">{item.name.split('.').pop()}</div>}
                                             {depth > 0 && <div className="absolute -left-3 top-1/2 -translate-y-1/2 w-2 h-[1px] bg-neutral-600"></div>}
                                         </div>
                                         <div className="min-w-0 flex-1">
@@ -2232,7 +2486,10 @@ const ReverseView = () => {
                                         </div>
                                     </div>
                                     {!item.isDirectory && (
-                                        <a href={`${API_URL}/reverse/files/${item.id}/download`} className="text-purple-400 hover:text-white transition p-2 rounded hover:bg-neutral-800 flex-shrink-0"><Download className="w-4 h-4" /></a>
+                                        <>
+                                            <button onClick={() => preview(`${API_URL}/reverse/files/${item.id}/download`, item.name)} className="text-neutral-500 hover:text-white transition p-2 rounded hover:bg-neutral-800 flex-shrink-0" title="Preview"><Eye className="w-4 h-4" /></button>
+                                            <a href={`${API_URL}/reverse/files/${item.id}/download`} className="text-purple-400 hover:text-white transition p-2 rounded hover:bg-neutral-800 flex-shrink-0"><Download className="w-4 h-4" /></a>
+                                        </>
                                     )}
                                 </div>
                             );
@@ -2249,176 +2506,186 @@ const ReverseView = () => {
     return (
         <div className="space-y-6 anim-slide">
             <div className="flex justify-between items-center"><h2 className="text-2xl font-bold text-white">Reverse Shares</h2><button onClick={() => setCreateMode(true)} className="bg-gradient-to-br from-purple-600 to-blue-600 hover:brightness-90 text-white px-4 py-2 rounded-lg font-bold flex items-center gap-2 transition btn-press"><Plus className="w-4 h-4" /> New link</button></div>
-            {createMode && (
-                <div className="bg-neutral-900 p-4 md:p-6 rounded-xl border border-neutral-800 mb-6 space-y-4 anim-scale">
-                    <h3 className="font-bold text-white">Create new link</h3>
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <AnimatePresence>
+                {createMode && (
+                    <motion.div
+                        key="create-panel"
+                        initial={{ opacity: 0, height: 0, marginBottom: 0 }}
+                        animate={{ opacity: 1, height: 'auto', marginBottom: 24 }}
+                        exit={{ opacity: 0, height: 0, marginBottom: 0 }}
+                        className="overflow-hidden"
+                    >
+                        <div className="bg-neutral-900 p-4 md:p-6 rounded-xl border border-neutral-800 space-y-4">
+                            <h3 className="font-bold text-white">Create new link</h3>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
 
-                        {/* Naam Veld */}
-                        <div className="relative group">
-                            <Type className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-neutral-500 group-focus-within:text-purple-400 transition" />
-                            <input
-                                className="w-full bg-black border border-neutral-700 rounded-lg py-2.5 pl-10 pr-4 text-white focus:border-purple-500 focus:ring-1 focus:ring-purple-500 outline-none transition-all placeholder:text-neutral-600"
-                                placeholder="Name of the share (e.g. Project X)"
-                                value={newShare.name}
-                                onChange={e => setNewShare({ ...newShare, name: e.target.value })}
-                            />
-                        </div>
-
-                        {/* Password Veld */}
-                        <div className="relative group">
-                            <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-neutral-500 group-focus-within:text-purple-400 transition" />
-                            <input
-                                type="password"
-                                className="w-full bg-black border border-neutral-700 rounded-lg py-2.5 pl-10 pr-4 text-white focus:border-purple-500 focus:ring-1 focus:ring-purple-500 outline-none transition-all placeholder:text-neutral-600"
-                                placeholder="Password (Optional)"
-                                value={newShare.password}
-                                onChange={e => setNewShare({ ...newShare, password: e.target.value })}
-                            />
-                        </div>
-
-                        {/* Max Grootte met Eenheid Selectie */}
-                        <div>
-                            <div className="flex gap-2 relative group">
-                                <div className="relative flex-1">
-                                    <HardDrive className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-neutral-500 group-focus-within:text-purple-400 transition" />
-                                    <input
-                                        type="number"
-                                        min="1"
-                                        className="w-full bg-black border border-neutral-700 rounded-lg py-2.5 pl-10 pr-4 text-white focus:border-purple-500 focus:ring-1 focus:ring-purple-500 outline-none transition-all placeholder:text-neutral-600"
-                                        placeholder="Max Upload"
-                                        value={newShare.maxSizeVal}
-                                        onChange={e => {
-                                            const val = e.target.value;
-                                            setNewShare({ ...newShare, maxSizeVal: val === '' ? 0 : parseInt(val) })
-                                        }}
-                                    />
-                                </div>
-                                {/* Aangepaste breedte: w-20 ipv w-28 */}
-                                <div className="relative w-20">
-                                    <select
-                                        className="w-full bg-black border border-neutral-700 rounded-lg py-2.5 px-2 text-white appearance-none focus:border-purple-500 focus:ring-1 focus:ring-purple-500 outline-none transition-all cursor-pointer font-medium pl-3"
-                                        value={newShare.maxSizeUnit}
-                                        onChange={e => setNewShare({ ...newShare, maxSizeUnit: e.target.value })}
-                                    >
-                                        <option value="MB">MB</option>
-                                        <option value="GB">GB</option>
-                                    </select>
-                                    <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-neutral-500 pointer-events-none" />
-                                </div>
-                            </div>
-                        </div>
-
-                        {/* Expiratie Controls met Datum Preview */}
-                        <div>
-                            <div className="flex gap-2 relative group">
-                                <div className="relative flex-1">
-                                    <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-neutral-500 group-focus-within:text-purple-400 transition" />
-                                    <input
-                                        type="number"
-                                        min="0"
-                                        className="w-full bg-black border border-neutral-700 rounded-lg py-2.5 pl-10 pr-4 text-white focus:border-purple-500 focus:ring-1 focus:ring-purple-500 outline-none transition-all placeholder:text-neutral-600"
-                                        placeholder="0 = Never"
-                                        value={newShare.expirationVal}
-                                        onChange={e => {
-                                            const val = e.target.value;
-                                            setNewShare({ ...newShare, expirationVal: val === '' ? 0 : parseInt(val) })
-                                        }}
-                                    />
-                                </div>
-                                <div className="relative w-32">
-                                    <select
-                                        className="w-full bg-black border border-neutral-700 rounded-lg py-2.5 px-3 text-white appearance-none focus:border-purple-500 focus:ring-1 focus:ring-purple-500 outline-none transition-all cursor-pointer"
-                                        value={newShare.expirationUnit}
-                                        onChange={e => setNewShare({ ...newShare, expirationUnit: e.target.value })}
-                                    >
-                                        {UNITS.map(u => (
-                                            <option key={u} value={u}>{getUnitLabel(newShare.expirationVal || 0, u)}</option>
-                                        ))}
-                                    </select>
-                                    <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-neutral-500 pointer-events-none" />
-                                </div>
-                            </div>
-                            {/* Datum Preview Tekst */}
-                            <p className="text-xs text-neutral-500 mt-1.5 ml-1 flex items-center gap-1.5">
-                                <Info className="w-3 h-3" />
-                                {!newShare.expirationVal || newShare.expirationVal === 0
-                                    ? "Never expires (Optional)"
-                                    : <span>Expires on: <span className="text-purple-400">{getFutureDate(newShare.expirationVal, newShare.expirationUnit)}</span></span>
-                                }
-                            </p>
-                        </div>
-
-                        {/* Email Veld & ID Generator Split */}
-                        <div className="md:col-span-2 grid grid-cols-1 md:grid-cols-2 gap-4">
-                            {/* Linkerkant: Email */}
-                            <div className="relative group">
-                                <label className="text-xs font-bold text-neutral-500 uppercase mb-1 block ml-1">Recipient (Email)</label>
-                                <div className="relative">
-                                    <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-neutral-500 group-focus-within:text-purple-400 transition" />
+                                {/* Naam Veld */}
+                                <div className="relative group">
+                                    <Type className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-neutral-500 group-focus-within:text-purple-400 transition" />
                                     <input
                                         className="w-full bg-black border border-neutral-700 rounded-lg py-2.5 pl-10 pr-4 text-white focus:border-purple-500 focus:ring-1 focus:ring-purple-500 outline-none transition-all placeholder:text-neutral-600"
-                                        placeholder="dan@example.com (Optional)"
-                                        value={newShare.sendEmailTo}
-                                        onChange={e => setNewShare({ ...newShare, sendEmailTo: e.target.value })}
+                                        placeholder="Name of the share (e.g. Project X)"
+                                        value={newShare.name}
+                                        onChange={e => setNewShare({ ...newShare, name: e.target.value })}
                                     />
                                 </div>
-                            </div>
 
-                            {/* Rechterkant: Custom ID */}
-                            <div>
-                                <label className="text-xs font-bold text-neutral-500 uppercase mb-1 flex justify-between ml-1">
-                                    <span>Link ID</span>
-                                    <span className="text-purple-400">{idLength} characters</span>
-                                </label>
-                                <div className="flex gap-2 mb-2">
+                                {/* Password Veld */}
+                                <div className="relative group">
+                                    <LockIcon className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-neutral-500 group-focus-within:text-purple-400 transition" />
                                     <input
-                                        className="w-full bg-black border border-neutral-700 rounded-lg py-2 px-3 text-white focus:border-purple-500 outline-none font-mono text-center tracking-wider"
-                                        value={newShare.customSlug}
-                                        onChange={e => setNewShare({ ...newShare, customSlug: e.target.value })}
+                                        type="password"
+                                        className="w-full bg-black border border-neutral-700 rounded-lg py-2.5 pl-10 pr-4 text-white focus:border-purple-500 focus:ring-1 focus:ring-purple-500 outline-none transition-all placeholder:text-neutral-600"
+                                        placeholder="Password (Optional)"
+                                        value={newShare.password}
+                                        onChange={e => setNewShare({ ...newShare, password: e.target.value })}
                                     />
-                                    <button onClick={() => generateId(idLength)} className="bg-neutral-800 hover:bg-neutral-700 p-2 rounded-lg text-white transition flex-shrink-0" title="Generate new ID">
-                                        <Loader2 className="w-5 h-5" />
-                                    </button>
                                 </div>
-                                <input
-                                    type="range"
-                                    min="8"
-                                    max="32"
-                                    value={idLength}
-                                    onChange={(e) => {
-                                        const len = parseInt(e.target.value);
-                                        setIdLength(len);
-                                        generateId(len);
-                                    }}
-                                    className="w-full accent-purple-600 h-2 bg-neutral-800 rounded-lg appearance-none cursor-pointer"
-                                />
+
+                                {/* Max Grootte met Eenheid Selectie */}
+                                <div>
+                                    <div className="flex gap-2 relative group">
+                                        <div className="relative flex-1">
+                                            <HardDrive className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-neutral-500 group-focus-within:text-purple-400 transition" />
+                                            <input
+                                                type="number"
+                                                min="1"
+                                                className="w-full bg-black border border-neutral-700 rounded-lg py-2.5 pl-10 pr-4 text-white focus:border-purple-500 focus:ring-1 focus:ring-purple-500 outline-none transition-all placeholder:text-neutral-600"
+                                                placeholder="Max Upload"
+                                                value={newShare.maxSizeVal}
+                                                onChange={e => {
+                                                    const val = e.target.value;
+                                                    setNewShare({ ...newShare, maxSizeVal: val === '' ? 0 : parseInt(val) })
+                                                }}
+                                            />
+                                        </div>
+                                        {/* Aangepaste breedte: w-20 ipv w-28 */}
+                                        <div className="relative w-20">
+                                            <select
+                                                className="w-full bg-black border border-neutral-700 rounded-lg py-2.5 px-2 text-white appearance-none focus:border-purple-500 focus:ring-1 focus:ring-purple-500 outline-none transition-all cursor-pointer font-medium pl-3"
+                                                value={newShare.maxSizeUnit}
+                                                onChange={e => setNewShare({ ...newShare, maxSizeUnit: e.target.value })}
+                                            >
+                                                <option value="MB">MB</option>
+                                                <option value="GB">GB</option>
+                                            </select>
+                                            <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-neutral-500 pointer-events-none" />
+                                        </div>
+                                    </div>
+                                </div>
+
+                                {/* Expiratie Controls met Datum Preview */}
+                                <div>
+                                    <div className="flex gap-2 relative group">
+                                        <div className="relative flex-1">
+                                            <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-neutral-500 group-focus-within:text-purple-400 transition" />
+                                            <input
+                                                type="number"
+                                                min="0"
+                                                className="w-full bg-black border border-neutral-700 rounded-lg py-2.5 pl-10 pr-4 text-white focus:border-purple-500 focus:ring-1 focus:ring-purple-500 outline-none transition-all placeholder:text-neutral-600"
+                                                placeholder="0 = Never"
+                                                value={newShare.expirationVal}
+                                                onChange={e => {
+                                                    const val = e.target.value;
+                                                    setNewShare({ ...newShare, expirationVal: val === '' ? 0 : parseInt(val) })
+                                                }}
+                                            />
+                                        </div>
+                                        <div className="relative w-32">
+                                            <select
+                                                className="w-full bg-black border border-neutral-700 rounded-lg py-2.5 px-3 text-white appearance-none focus:border-purple-500 focus:ring-1 focus:ring-purple-500 outline-none transition-all cursor-pointer"
+                                                value={newShare.expirationUnit}
+                                                onChange={e => setNewShare({ ...newShare, expirationUnit: e.target.value })}
+                                            >
+                                                {UNITS.map(u => (
+                                                    <option key={u} value={u}>{getUnitLabel(newShare.expirationVal || 0, u)}</option>
+                                                ))}
+                                            </select>
+                                            <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-neutral-500 pointer-events-none" />
+                                        </div>
+                                    </div>
+                                    {/* Datum Preview Tekst */}
+                                    <p className="text-xs text-neutral-500 mt-1.5 ml-1 flex items-center gap-1.5">
+                                        <Info className="w-3 h-3" />
+                                        {!newShare.expirationVal || newShare.expirationVal === 0
+                                            ? "Never expires (Optional)"
+                                            : <span>Expires on: <span className="text-purple-400">{getFutureDate(newShare.expirationVal, newShare.expirationUnit)}</span></span>
+                                        }
+                                    </p>
+                                </div>
+
+                                {/* Email Veld & ID Generator Split */}
+                                <div className="md:col-span-2 grid grid-cols-1 md:grid-cols-2 gap-4">
+                                    {/* Linkerkant: Email */}
+                                    <div className="relative group">
+                                        <label className="text-xs font-bold text-neutral-500 uppercase mb-1 block ml-1">Recipient (Email)</label>
+                                        <div className="relative">
+                                            <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-neutral-500 group-focus-within:text-purple-400 transition" />
+                                            <input
+                                                className="w-full bg-black border border-neutral-700 rounded-lg py-2.5 pl-10 pr-4 text-white focus:border-purple-500 focus:ring-1 focus:ring-purple-500 outline-none transition-all placeholder:text-neutral-600"
+                                                placeholder="dan@example.com (Optional)"
+                                                value={newShare.sendEmailTo}
+                                                onChange={e => setNewShare({ ...newShare, sendEmailTo: e.target.value })}
+                                            />
+                                        </div>
+                                    </div>
+
+                                    {/* Rechterkant: Custom ID */}
+                                    <div>
+                                        <label className="text-xs font-bold text-neutral-500 uppercase mb-1 flex justify-between ml-1">
+                                            <span>Link ID</span>
+                                            <span className="text-purple-400">{idLength} characters</span>
+                                        </label>
+                                        <div className="flex gap-2 mb-2">
+                                            <input
+                                                className="w-full bg-black border border-neutral-700 rounded-lg py-2 px-3 text-white focus:border-purple-500 outline-none font-mono text-center tracking-wider"
+                                                value={newShare.customSlug}
+                                                onChange={e => setNewShare({ ...newShare, customSlug: e.target.value })}
+                                            />
+                                            <button onClick={() => generateId(idLength)} className="bg-neutral-800 hover:bg-neutral-700 p-2 rounded-lg text-white transition flex-shrink-0" title="Generate new ID">
+                                                <Loader2 className="w-5 h-5" />
+                                            </button>
+                                        </div>
+                                        <input
+                                            type="range"
+                                            min="8"
+                                            max="32"
+                                            value={idLength}
+                                            onChange={(e) => {
+                                                const len = parseInt(e.target.value);
+                                                setIdLength(len);
+                                                generateId(len);
+                                            }}
+                                            className="w-full accent-purple-600 h-2 bg-neutral-800 rounded-lg appearance-none cursor-pointer"
+                                        />
+                                    </div>
+                                </div>
+
+                                {/* Bedankt Bericht */}
+                                <div className="md:col-span-2 relative group">
+                                    <MessageSquare className="absolute left-3 top-3 w-5 h-5 text-neutral-500 group-focus-within:text-purple-400 transition" />
+                                    <input
+                                        className="w-full bg-black border border-neutral-700 rounded-lg py-2.5 pl-10 pr-4 text-white focus:border-purple-500 focus:ring-1 focus:ring-purple-500 outline-none transition-all placeholder:text-neutral-600"
+                                        placeholder="Custom Thank You Message (e.g. Thanks for the files!)"
+                                        value={newShare.thankYouMessage}
+                                        onChange={e => setNewShare({ ...newShare, thankYouMessage: e.target.value })}
+                                    />
+                                    <p className="text-xs text-neutral-500 mt-1.5 ml-1">This message is what the uploader sees after successful submission.</p>
+                                </div>
+
+                                <div className="md:col-span-2 mt-2">
+                                    <Checkbox
+                                        checked={newShare.notify}
+                                        onChange={(e) => setNewShare({ ...newShare, notify: e.target.checked })}
+                                        label="Send me an email notification for every upload"
+                                    />
+                                </div>
                             </div>
+                            <div className="flex justify-end gap-2"><button onClick={() => setCreateMode(false)} className="text-neutral-400 px-4 hover:text-white transition">Cancel</button><button onClick={create} className="bg-green-600 hover:bg-green-700 text-white px-6 py-2 rounded font-bold transition btn-press shadow-lg shadow-green-900/20">Create</button></div>
                         </div>
-
-                        {/* Bedankt Bericht */}
-                        <div className="md:col-span-2 relative group">
-                            <MessageSquare className="absolute left-3 top-3 w-5 h-5 text-neutral-500 group-focus-within:text-purple-400 transition" />
-                            <input
-                                className="w-full bg-black border border-neutral-700 rounded-lg py-2.5 pl-10 pr-4 text-white focus:border-purple-500 focus:ring-1 focus:ring-purple-500 outline-none transition-all placeholder:text-neutral-600"
-                                placeholder="Custom Thank You Message (e.g. Thanks for the files!)"
-                                value={newShare.thankYouMessage}
-                                onChange={e => setNewShare({ ...newShare, thankYouMessage: e.target.value })}
-                            />
-                            <p className="text-xs text-neutral-500 mt-1.5 ml-1">This message is what the uploader sees after successful submission.</p>
-                        </div>
-
-                        <div className="md:col-span-2 mt-2">
-                            <Checkbox
-                                checked={newShare.notify}
-                                onChange={(e) => setNewShare({ ...newShare, notify: e.target.checked })}
-                                label="Send me an email notification for every upload"
-                            />
-                        </div>
-                    </div>
-                    <div className="flex justify-end gap-2"><button onClick={() => setCreateMode(false)} className="text-neutral-400 px-4 hover:text-white transition">Cancel</button><button onClick={create} className="bg-green-600 hover:bg-green-700 text-white px-6 py-2 rounded font-bold transition btn-press shadow-lg shadow-green-900/20">Create</button></div>
-                </div>
-            )}
+                    </motion.div>
+                )}
+            </AnimatePresence>
 
             {shares.length === 0 && !createMode && (
                 <div className="bg-neutral-900/50 rounded-2xl border-2 border-dashed border-neutral-800 p-10 flex flex-col items-center justify-center text-neutral-500">
@@ -2430,7 +2697,7 @@ const ReverseView = () => {
                 {shares.map(s => (
                     <div key={s.id} className="bg-neutral-900 p-4 md:p-6 rounded-xl border border-neutral-800 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 hover:border-neutral-600 transition duration-300">
                         <div>
-                            <h4 className="font-bold text-white flex items-center gap-2">{s.name} {s.protected && <Lock className="w-3 h-3 text-yellow-500" />}</h4>
+                            <h4 className="font-bold text-white flex items-center gap-2">{s.name} {s.protected && <LockIcon className="w-3 h-3 text-yellow-500" />}</h4>
                             <div className="flex gap-4 text-sm text-neutral-400 mt-1 flex-wrap">
                                 <CopyButton text={s.url} className="bg-purple-500/10 text-purple-400 px-2 rounded font-mono break-all text-left whitespace-normal" />
                                 <span>{s.file_count || 0} receive files</span>
@@ -2468,7 +2735,9 @@ const ConfigTabs = ({ user, onRestartSetup }: { user: any, onRestartSetup: () =>
     const [contacts, setContacts] = useState<any[]>([]);
     const [newUser, setNewUser] = useState({ email: '', name: '', password: '', is_admin: false });
     const [editUser, setEditUser] = useState<any>(null);
-    const { notify, confirm } = useUI();
+    const { notify, confirm, isConfirming, isPreviewing } = useUI();
+
+    useEscapeKey(() => setEditUser(null), !!editUser && !isConfirming && !isPreviewing);
 
     // Validatie State voor Users Tab
     const [pwdValid, setPwdValid] = useState({ length: false, upper: false, lower: false, number: false });
@@ -2894,7 +3163,7 @@ const ConfigTabs = ({ user, onRestartSetup }: { user: any, onRestartSetup: () =>
                         </div>
 
                         <div className="border-t border-neutral-800 pt-6">
-                            <h3 className="text-white font-bold text-xl mb-6 flex gap-2"><File className="w-6 h-6 text-purple-500" /> File Type Restrictions</h3>
+                            <h3 className="text-white font-bold text-xl mb-6 flex gap-2"><FileIcon className="w-6 h-6 text-purple-500" /> File Type Restrictions</h3>
                             <p className="text-neutral-400 text-sm mb-6">Specify which file extensions should be blocked. <br />Files with these extensions will be rejected immediately upon upload.</p>
 
                             <ExtensionSelector
@@ -3107,48 +3376,63 @@ const ConfigTabs = ({ user, onRestartSetup }: { user: any, onRestartSetup: () =>
                 )}
             </div>
 
-            {editUser && (
-                <ModalPortal>
-                    <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[9999] flex items-center justify-center p-4 anim-fade">
-                        <div className="bg-neutral-900 w-full max-w-lg rounded-2xl border border-neutral-700 p-4 md:p-8 anim-scale shadow-2xl">
-                            <h3 className="text-xl font-bold text-white mb-6">Edit User</h3>
-                            <div className="space-y-4">
-                                <div><label className="text-xs font-bold text-neutral-500 uppercase mb-1 block">Name</label><input className="w-full bg-black border border-neutral-700 rounded-lg p-3 text-white" value={editUser.name} onChange={e => setEditUser({ ...editUser, name: e.target.value })} /></div>
-                                <div><label className="text-xs font-bold text-neutral-500 uppercase mb-1 block">Email</label><input className="w-full bg-black border border-neutral-700 rounded-lg p-3 text-white" value={editUser.email} onChange={e => setEditUser({ ...editUser, email: e.target.value })} /></div>
-                                <div><label className="text-xs font-bold text-neutral-500 uppercase mb-1 block">Password (Leave blank for no change)</label><input className="w-full bg-black border border-neutral-700 rounded-lg p-3 text-white" type="password" placeholder="New Password" onChange={e => setEditUser({ ...editUser, password: e.target.value })}
-                                />
-                                    {/* Validatie Box voor Edit User */}
-                                    {editUser.password && editUser.password.length > 0 && (
-                                        <div className="mt-2 grid grid-cols-2 gap-2 text-xs mb-3 p-3 bg-neutral-900/50 rounded-lg border border-neutral-800">
-                                            <div className={`flex items-center gap-1.5 ${pwdValid.length ? 'text-green-500' : 'text-neutral-500'}`}>
-                                                {pwdValid.length ? <Check className="w-3 h-3" /> : <div className="w-3 h-3 rounded-full border border-neutral-600" />} 8+ characters
+            <AnimatePresence>
+                {editUser && (
+                    <ModalPortal>
+                        <motion.div
+                            key="edit-user-modal"
+                            initial={{ opacity: 0, backdropFilter: "blur(0px)" }}
+                            animate={{ opacity: 1, backdropFilter: "blur(4px)" }}
+                            exit={{ opacity: 0, backdropFilter: "blur(0px)" }}
+                            className="fixed inset-0 bg-black/80 z-[9999] flex items-center justify-center p-4"
+                            onClick={() => setEditUser(null)}
+                        >
+                            <motion.div
+                                initial={{ scale: 0.95, opacity: 0 }}
+                                animate={{ scale: 1, opacity: 1 }}
+                                exit={{ scale: 0.95, opacity: 0 }}
+                                className="bg-neutral-900 w-full max-w-lg rounded-2xl border border-neutral-700 p-4 md:p-8 shadow-2xl"
+                                onClick={(e: React.MouseEvent) => e.stopPropagation()}
+                            >
+                                <h3 className="text-xl font-bold text-white mb-6">Edit User</h3>
+                                <div className="space-y-4">
+                                    <div><label className="text-xs font-bold text-neutral-500 uppercase mb-1 block">Name</label><input className="w-full bg-black border border-neutral-700 rounded-lg p-3 text-white" value={editUser.name} onChange={e => setEditUser({ ...editUser, name: e.target.value })} /></div>
+                                    <div><label className="text-xs font-bold text-neutral-500 uppercase mb-1 block">Email</label><input className="w-full bg-black border border-neutral-700 rounded-lg p-3 text-white" value={editUser.email} onChange={e => setEditUser({ ...editUser, email: e.target.value })} /></div>
+                                    <div><label className="text-xs font-bold text-neutral-500 uppercase mb-1 block">Password (Leave blank for no change)</label><input className="w-full bg-black border border-neutral-700 rounded-lg p-3 text-white" type="password" placeholder="New Password" onChange={e => setEditUser({ ...editUser, password: e.target.value })}
+                                    />
+                                        {/* Validatie Box voor Edit User */}
+                                        {editUser.password && editUser.password.length > 0 && (
+                                            <div className="mt-2 grid grid-cols-2 gap-2 text-xs mb-3 p-3 bg-neutral-900/50 rounded-lg border border-neutral-800">
+                                                <div className={`flex items-center gap-1.5 ${pwdValid.length ? 'text-green-500' : 'text-neutral-500'}`}>
+                                                    {pwdValid.length ? <Check className="w-3 h-3" /> : <div className="w-3 h-3 rounded-full border border-neutral-600" />} 8+ characters
+                                                </div>
+                                                <div className={`flex items-center gap-1.5 ${pwdValid.upper ? 'text-green-500' : 'text-neutral-500'}`}>
+                                                    {pwdValid.upper ? <Check className="w-3 h-3" /> : <div className="w-3 h-3 rounded-full border border-neutral-600" />} Upper case
+                                                </div>
+                                                <div className={`flex items-center gap-1.5 ${pwdValid.lower ? 'text-green-500' : 'text-neutral-500'}`}>
+                                                    {pwdValid.lower ? <Check className="w-3 h-3" /> : <div className="w-3 h-3 rounded-full border border-neutral-600" />} Lower case
+                                                </div>
+                                                <div className={`flex items-center gap-1.5 ${pwdValid.number ? 'text-green-500' : 'text-neutral-500'}`}>
+                                                    {pwdValid.number ? <Check className="w-3 h-3" /> : <div className="w-3 h-3 rounded-full border border-neutral-600" />} Number
+                                                </div>
                                             </div>
-                                            <div className={`flex items-center gap-1.5 ${pwdValid.upper ? 'text-green-500' : 'text-neutral-500'}`}>
-                                                {pwdValid.upper ? <Check className="w-3 h-3" /> : <div className="w-3 h-3 rounded-full border border-neutral-600" />} Upper case
-                                            </div>
-                                            <div className={`flex items-center gap-1.5 ${pwdValid.lower ? 'text-green-500' : 'text-neutral-500'}`}>
-                                                {pwdValid.lower ? <Check className="w-3 h-3" /> : <div className="w-3 h-3 rounded-full border border-neutral-600" />} Lower case
-                                            </div>
-                                            <div className={`flex items-center gap-1.5 ${pwdValid.number ? 'text-green-500' : 'text-neutral-500'}`}>
-                                                {pwdValid.number ? <Check className="w-3 h-3" /> : <div className="w-3 h-3 rounded-full border border-neutral-600" />} Number
-                                            </div>
-                                        </div>
-                                    )}
+                                        )}
+                                    </div>
+                                    <Checkbox
+                                        checked={editUser.is_admin}
+                                        onChange={e => setEditUser({ ...editUser, is_admin: e.target.checked })}
+                                        label="Admin privileges"
+                                    />
                                 </div>
-                                <Checkbox
-                                    checked={editUser.is_admin}
-                                    onChange={e => setEditUser({ ...editUser, is_admin: e.target.checked })}
-                                    label="Admin privileges"
-                                />
-                            </div>
-                            <div className="flex justify-end gap-3 mt-6 border-t border-neutral-700 pt-4">
-                                <button onClick={() => setEditUser(null)} className="text-neutral-400 hover:text-white px-4 py-2 transition">Cancel</button>
-                                <button onClick={updateUser} className="bg-gradient-to-br from-purple-600 to-blue-600 hover:brightness-90 px-6 py-2 rounded-lg text-white font-bold transition btn-press">Save</button>
-                            </div>
-                        </div>
-                    </div>
-                </ModalPortal>
-            )}
+                                <div className="flex justify-end gap-3 mt-6 border-t border-neutral-700 pt-4">
+                                    <button onClick={() => setEditUser(null)} className="text-neutral-400 hover:text-white px-4 py-2 transition">Cancel</button>
+                                    <button onClick={updateUser} className="bg-gradient-to-br from-purple-600 to-blue-600 hover:brightness-90 px-6 py-2 rounded-lg text-white font-bold transition btn-press">Save</button>
+                                </div>
+                            </motion.div>
+                        </motion.div>
+                    </ModalPortal>
+                )}
+            </AnimatePresence>
         </div>
     );
 };
@@ -3925,13 +4209,13 @@ const GuestUploadPage = () => {
     const [error, setError] = useState<string | null>(null); // State toevoegen
     const [password, setPassword] = useState('');
     const [unlocked, setUnlocked] = useState(false);
+    const { notify, preview } = useUI();
     const [files, setFiles] = useState<UploadItem[]>([]);
     const [uploading, setUploading] = useState(false);
     const [success, setSuccess] = useState(false);
     const [progress, setProgress] = useState(0);
     const fileInputRef = useRef<HTMLInputElement>(null);
     const folderInputRef = useRef<HTMLInputElement>(null);
-    const { notify } = useUI();
 
     useEffect(() => {
         // Fetch met error handling
@@ -4164,12 +4448,17 @@ const GuestUploadPage = () => {
 
                             <div className="relative z-20 flex gap-3 mt-0 pointer-events-auto">
                                 <button onClick={(e) => { e.stopPropagation(); fileInputRef.current?.click(); }} className="text-xs bg-neutral-800 hover:bg-neutral-700 text-white px-3 py-2 rounded-lg transition border border-neutral-700 cursor-pointer hover:border-purple-500">Select Files</button>
-                                <button onClick={(e) => { e.stopPropagation(); onPickFolder(); }} className="text-xs bg-neutral-800 hover:bg-neutral-700 text-white px-3 py-2 rounded-lg transition border border-neutral-700 flex items-center gap-2 cursor-pointer hover:border-purple-500"><Folder className="w-3 h-3" /> Select Folder</button>
+                                <button onClick={(e) => { e.stopPropagation(); onPickFolder(); }} className="text-xs bg-neutral-800 hover:bg-neutral-700 text-white px-3 py-2 rounded-lg transition border border-neutral-700 flex items-center gap-2 cursor-pointer hover:border-purple-500"><FolderIcon className="w-3 h-3" /> Select Folder</button>
                             </div>
+                            {info.maxSize && (
+                                <div className="mt-4 px-3 py-1 rounded-full bg-neutral-800 border border-neutral-700 text-xs text-neutral-400 font-medium">
+                                    Max size: {formatBytes(info.maxSize)}
+                                </div>
+                            )}
                         </div>
 
                         {/* @ts-ignore */}
-                        <input ref={fileInputRef} type="file" multiple className="hidden" webkitdirectory="" mozdirectory="" onChange={e => {
+                        <input ref={fileInputRef} type="file" multiple className="hidden" onChange={e => {
                             if (e.target.files) {
                                 const newFiles = Array.from(e.target.files as FileList).map((f: any) => ({
                                     file: f, path: f.webkitRelativePath || f.name, name: f.name, id: generateUUID(), isDirectory: false, size: f.size
@@ -4180,17 +4469,22 @@ const GuestUploadPage = () => {
                         }} />
 
                         {files.length > 0 && (
-                            <div className="mt-8 bg-neutral-900 rounded-2xl border border-neutral-800 overflow-hidden shadow-xl">
+                            <div className="mt-2 bg-neutral-900 rounded-2xl border border-neutral-800 overflow-hidden shadow-xl" style={{ "--indent-step": "24px" } as React.CSSProperties}>
+                                <style>{`@media (max-width: 768px) { [style*="--indent-step"] { --indent-step: 12px !important; } }`}</style>
                                 <div className="max-h-[300px] overflow-y-auto">
                                     {files.map((item) => {
                                         const segments = item.path.split('/');
                                         const depth = Math.max(0, segments.length - 1);
-                                        const indent = depth * 24;
+                                        // Using calc with var for responsive indent
                                         return (
-                                            <div key={item.id} className={`flex justify-between items-center p-3 md:p-4 border-b border-neutral-800 last:border-0 hover:bg-neutral-800/50 transition gap-2 ${item.isDirectory ? 'bg-neutral-800/30' : ''}`}>
-                                                <div className="flex items-center gap-2 md:gap-4 overflow-hidden flex-1 min-w-0" style={{ paddingLeft: `${indent}px` }}>
+                                            <div key={item.id} className={`flex justify-between items-center px-3 py-2 md:px-4 md:py-3 border-b border-neutral-800 last:border-0 hover:bg-neutral-800/50 transition gap-2 ${item.isDirectory ? 'bg-neutral-800/30' : ''}`}>
+                                                <div
+                                                    className="flex items-center gap-2 md:gap-4 overflow-hidden flex-1 min-w-0 cursor-pointer"
+                                                    style={{ paddingLeft: `calc(${depth} * var(--indent-step, 12px))` }}
+                                                    onClick={() => !item.isDirectory && item.file && preview(item.file, item.name)}
+                                                >
                                                     <div className="bg-black p-2 rounded-lg flex-shrink-0 relative">
-                                                        {item.isDirectory ? <Folder className="w-4 h-4 text-purple-400" /> : <div className="uppercase text-xs font-bold text-purple-400">{item.name.split('.').pop()}</div>}
+                                                        {item.isDirectory ? <FolderIcon className="w-4 h-4 text-purple-400" /> : <div className="uppercase text-xs font-bold text-purple-400">{item.name.split('.').pop()}</div>}
                                                         {depth > 0 && <div className="absolute -left-3 top-1/2 -translate-y-1/2 w-2 h-[1px] bg-neutral-600"></div>}
                                                     </div>
                                                     <div className="min-w-0 flex-1">
@@ -4198,7 +4492,18 @@ const GuestUploadPage = () => {
                                                         {!item.isDirectory && <p className="text-neutral-500 text-xs">{formatBytes(item.size)}</p>}
                                                     </div>
                                                 </div>
-                                                <button onClick={(e) => { e.stopPropagation(); setFiles(files.filter(x => x.id !== item.id && !x.path.startsWith(item.path + '/'))) }} className="text-neutral-500 hover:text-red-400 p-2 transition flex-shrink-0"><X className="w-4 h-4 md:w-5 md:h-5" /></button>
+                                                <div className="flex items-center gap-2">
+                                                    {!item.isDirectory && (
+                                                        <button
+                                                            onClick={(e) => { e.stopPropagation(); item.file && preview(item.file, item.name); }}
+                                                            className="text-neutral-500 hover:text-white p-2 transition flex-shrink-0 hidden md:block"
+                                                            title="Preview"
+                                                        >
+                                                            <Eye className="w-4 h-4 md:w-5 md:h-5" />
+                                                        </button>
+                                                    )}
+                                                    <button onClick={(e) => { e.stopPropagation(); setFiles(files.filter(x => x.id !== item.id && !x.path.startsWith(item.path + '/'))) }} className="text-neutral-500 hover:text-red-400 p-2 transition flex-shrink-0"><X className="w-4 h-4 md:w-5 md:h-5" /></button>
+                                                </div>
                                             </div>
                                         );
                                     })}
@@ -4329,7 +4634,7 @@ const DownloadPage = () => {
     const [viewFiles, setViewFiles] = useState<UploadItem[]>([]); // New state for transformed files
     const [error, setError] = useState<string | null>(null);
     const [password, setPassword] = useState('');
-    const { notify } = useUI();
+    const { notify, preview } = useUI();
 
     useEffect(() => {
         // We passen de fetch aan om errors af te vangen
@@ -4447,34 +4752,49 @@ const DownloadPage = () => {
                             </div>
                         )}
 
-                        <div className="space-y-2 mb-6 max-h-[400px] overflow-y-auto bg-black/50 rounded-lg border border-neutral-800">
+                        <div className="mb-6 max-h-[400px] overflow-y-auto bg-black/50 rounded-lg border border-neutral-800" style={{ "--indent-step": "24px" } as React.CSSProperties}>
+                            <style>{`@media (max-width: 768px) { [style*="--indent-step"] { --indent-step: 12px !important; } }`}</style>
                             {viewFiles.map((item) => {
                                 const segments = item.path.split('/');
                                 const depth = Math.max(0, segments.length - 1);
-                                const indent = depth * 24;
 
                                 return (
-                                    <div key={item.id} className={`flex justify-between items-center p-3 last:border-0 hover:bg-neutral-800/50 transition gap-2 ${item.isDirectory ? 'bg-neutral-800/30' : ''}`}>
-                                        <div className="flex items-center gap-2 md:gap-4 overflow-hidden flex-1 min-w-0" style={{ paddingLeft: `${indent}px` }}>
-                                            <div className="bg-black p-2 rounded-lg flex-shrink-0 relative">
-                                                {item.isDirectory ? <Folder className="w-4 h-4 text-purple-400" /> : <div className="uppercase text-xs font-bold text-purple-400">{item.name.split('.').pop()}</div>}
+                                    <div key={item.id} className={`flex justify-between items-center px-3 py-2 md:px-4 md:py-3 border-b border-neutral-800 last:border-0 hover:bg-neutral-800/50 transition gap-2 ${item.isDirectory ? 'bg-neutral-800/30' : ''}`}>
+                                        {/* Klik op naam = Preview */}
+                                        <div
+                                            className="flex items-center gap-2 md:gap-4 overflow-hidden flex-1 min-w-0 cursor-pointer group"
+                                            style={{ paddingLeft: `calc(${depth} * var(--indent-step, 12px))` }}
+                                            onClick={() => !item.isDirectory && preview(`${API_URL}/shares/${id}/files/${item.id}`, item.name)}
+                                        >
+                                            <div className="bg-black p-2 rounded-lg flex-shrink-0 relative group-hover:bg-neutral-700 transition">
+                                                {item.isDirectory ? <FolderIcon className="w-4 h-4 text-purple-400" /> : <div className="uppercase text-xs font-bold text-purple-400 min-w-[2.5rem] w-auto text-center">{item.name.split('.').pop()}</div>}
                                                 {depth > 0 && <div className="absolute -left-3 top-1/2 -translate-y-1/2 w-2 h-[1px] bg-neutral-600"></div>}
                                             </div>
                                             <div className="min-w-0 flex-1">
-                                                <p className={`text-neutral-200 font-medium truncate text-sm md:text-base ${item.isDirectory ? 'text-purple-300' : ''}`}>{item.name}</p>
+                                                <p className={`text-neutral-200 font-medium truncate text-sm md:text-base ${item.isDirectory ? 'text-purple-300' : 'group-hover:text-purple-300 transition'}`}>{item.name}</p>
                                                 {!item.isDirectory && <p className="text-neutral-500 text-xs">{formatBytes(item.size)}</p>}
                                             </div>
                                         </div>
 
                                         {!item.isDirectory && (
-                                            <a
-                                                href={`${API_URL}/shares/${id}/files/${item.id}`}
-                                                target="_blank"
-                                                rel="noopener noreferrer"
-                                                className="text-purple-400 hover:text-white p-2 rounded hover:bg-neutral-800 transition flex-shrink-0"
-                                            >
-                                                <Download className="w-4 h-4" />
-                                            </a>
+                                            <div className="flex items-center gap-2">
+                                                <button
+                                                    onClick={() => preview(`${API_URL}/shares/${id}/files/${item.id}`, item.name)}
+                                                    className="text-neutral-400 hover:text-white p-2 rounded hover:bg-neutral-800 transition hidden md:block"
+                                                    title="Preview"
+                                                >
+                                                    <Eye className="w-4 h-4" />
+                                                </button>
+                                                <a
+                                                    href={`${API_URL}/shares/${id}/files/${item.id}`}
+                                                    target="_blank"
+                                                    rel="noopener noreferrer"
+                                                    className="text-purple-400 hover:text-white p-2 rounded hover:bg-neutral-800 transition flex-shrink-0"
+                                                    title="Download"
+                                                >
+                                                    <Download className="w-4 h-4" />
+                                                </a>
+                                            </div>
                                         )}
                                     </div>
                                 );
