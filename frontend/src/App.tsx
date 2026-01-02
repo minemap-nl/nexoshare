@@ -1880,6 +1880,35 @@ const MySharesView = () => {
         });
     };
 
+    const deleteFolder = async (shareId: string, path: string) => {
+        confirm("Are you sure you want to delete this folder and all its contents?", async () => {
+            const res = await fetch(`${API_URL}/shares/${shareId}/folder?path=${encodeURIComponent(path)}`, {
+                method: 'DELETE',
+                credentials: 'include'
+            });
+            const data = await res.json();
+
+            if (res.ok) {
+                if (data.shareDeleted) {
+                    setEditing(null);
+                    notify("Share deleted because it was empty", "info");
+                } else {
+                    if (editing) {
+                        // We moeten herladen vanuit de server omdat we niet precies weten welke IDs zijn verwijderd (enkel prefix)
+                        // Alternatief kan zijn: filter alle files die starten met 'path/'
+                        const updatedShare = { ...editing };
+                        updatedShare.files = updatedShare.files.filter((f: any) => !f.original_name.startsWith(path + '/'));
+                        setEditing(updatedShare);
+                    }
+                    notify("Folder deleted", "success");
+                }
+                load();
+            } else {
+                notify(data.error || "Error while deleting folder", "error");
+            }
+        });
+    };
+
     const [stagedFiles, setStagedFiles] = useState<any[]>([]); // { tempId, originalName, size, mimeType }
     const [isStaging, setIsStaging] = useState(false);
 
@@ -2227,11 +2256,13 @@ const MySharesView = () => {
                                                                 </div>
 
                                                                 <div className="flex items-center gap-1">
-                                                                    {!item.isDirectory && (
+                                                                    {!item.isStaged && ( // Staged folder deletion niet supported
                                                                         <button
                                                                             onClick={(e) => {
                                                                                 e.stopPropagation();
-                                                                                if (item.isStaged) {
+                                                                                if (item.isDirectory) {
+                                                                                    deleteFolder(editing.id, item.path);
+                                                                                } else if (item.isStaged) {
                                                                                     setStagedFiles(prev => prev.filter(p => p.tempId !== item.id));
                                                                                 } else {
                                                                                     deleteFile(editing.id, item.id);

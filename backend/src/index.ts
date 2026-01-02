@@ -3084,6 +3084,71 @@ apiRouter.delete('/shares/:id/files/:fileId', authenticateToken, async (req, res
     }
 });
 
+apiRouter.delete('/shares/:id/folder', authenticateToken, async (req, res) => {
+    const authReq = req as AuthRequest;
+    const { id } = req.params;
+    const folderPath = req.query.path as string;
+
+    if (!folderPath) {
+        return res.status(400).json({ error: 'Folder path is required' });
+    }
+
+    try {
+        // 1. Verify Ownership & Get Share
+        const shareRes = await pool.query('SELECT user_id FROM shares WHERE id = $1', [id]);
+        if (shareRes.rows.length === 0) return res.status(404).json({ error: 'Share not found' });
+        if (shareRes.rows[0].user_id !== authReq.user!.id) return res.status(403).json({ error: 'Access denied' });
+
+        // 2. Find all files that are inside this folder (prefix match on original_name)
+        // We look for files where original_name starts with "{folderPath}/"
+        const prefix = folderPath.endsWith('/') ? folderPath : `${folderPath}/`;
+
+        // Escape special characters in prefix for LIKE query if necessary, but standard parameterization handles most.
+        // However, standard SQL 'LIKE' needs % wildcards.
+        const fileRes = await pool.query(
+            'SELECT id, storage_path FROM files WHERE share_id = $1 AND original_name LIKE $2',
+            [id, `${prefix}%`]
+        );
+
+        if (fileRes.rows.length === 0) {
+            return res.status(404).json({ error: 'Folder not found or empty' });
+        }
+
+        // 3. Delete files from DB & Disk
+        for (const file of fileRes.rows) {
+            await pool.query('DELETE FROM files WHERE id = $1', [file.id]);
+            await fs.unlink(file.storage_path).catch(() => { });
+        }
+
+        // 4. Try to remove the physical folder structure if it exists (best effort)
+        // The files are flattened in the share folder, but if we had a structure logic...
+        // Actually, in this app 'files' are stored flat with a random hash name in uploaddir/shareid/
+        // The 'folder' structure is virtual based on 'original_name'.
+        // So we only needed to delete the files that matched the virtual path.
+
+        // Check if share is empty
+        const remaining = await pool.query('SELECT COUNT(*) FROM files WHERE share_id = $1', [id]);
+        const count = parseInt(remaining.rows[0].count);
+
+        if (count === 0) {
+            try {
+                await fs.rm(path.join(UPLOAD_DIR, id), { recursive: true, force: true });
+            } catch (e) { }
+
+            await pool.query('DELETE FROM shares WHERE id = $1', [id]);
+            await logAudit(authReq.user!.id, 'share_deleted_empty', 'share', id, req, { reason: 'folder_deleted_empty' });
+            return res.json({ success: true, shareDeleted: true });
+        }
+
+        await logAudit(authReq.user!.id, 'folder_deleted', 'share', id, req, { folder: folderPath, fileCount: fileRes.rows.length });
+        res.json({ success: true, shareDeleted: false });
+
+    } catch (e: any) {
+        console.error('Delete folder error:', e);
+        res.status(500).json({ error: 'Failed to delete folder' });
+    }
+});
+
 // REVERSE
 apiRouter.post('/reverse', authenticateToken, async (req, res) => {
     const authReq = req as AuthRequest;
