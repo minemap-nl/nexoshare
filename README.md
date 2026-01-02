@@ -70,7 +70,7 @@ Unlike many standard open-source solutions, Nexo Share focuses heavily on securi
 
 * [React][react-url]
 * [TypeScript][typescript-url]
-* [Node.js][node-url]
+* [Bun][bun-url]
 * [Express][express-url]
 * [PostgreSQL][postgresql-url]
 * [Docker][docker-url]
@@ -244,7 +244,7 @@ Project Repository: https://github.com/minemap-nl/nexoshare
 
 [react-url]: https://reactjs.org/
 [typescript-url]: https://www.typescriptlang.org/
-[node-url]: https://nodejs.org/
+[bun-url]: https://bun.sh/
 [express-url]: https://expressjs.com/
 [postgresql-url]: https://www.postgresql.org/
 [docker-url]: https://www.docker.com/
