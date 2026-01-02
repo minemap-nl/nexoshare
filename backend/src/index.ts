@@ -223,6 +223,11 @@ cron.schedule('0 * * * *', async () => {
         // 5. Cleanup oude audit logs (ouder dan 1 jaar bewaren is meestal genoeg)
         await pool.query("DELETE FROM audit_logs WHERE created_at < NOW() - INTERVAL '1 year'");
 
+        // 6. Cleanup Orphaned Files (Disk vs DB sync)
+        await cleanupOrphanedFolders();
+        await cleanupOrphanedGuestFiles();
+        await cleanupOrphanedShareFiles();
+
         console.log('✅ Opruiming voltooid.');
     } catch (e) {
         console.error('❌ Fout bij opruiming:', e);
@@ -341,14 +346,6 @@ const cleanupOrphanedShareFiles = async () => {
     }
 };
 
-// Voeg toe aan je bestaande cron (elk uur):
-cron.schedule('0 * * * *', async () => {
-    // ... je bestaande logica ...
-    await cleanupOrphanedFolders();
-    await cleanupOrphanedGuestFiles();
-    await cleanupOrphanedShareFiles();
-});
-
 // Cleanup tijdelijke bestanden: Elke 15 Minutes draaien
 cron.schedule('*/15 * * * *', async () => {
     console.log('🧹 Start cleaning up temporary files...');
@@ -375,7 +372,8 @@ cron.schedule('*/15 * * * *', async () => {
                 // Bestand misschien al weg of locked, negeren
             }
         }
-        if (deletedCount > 0) console.log(`✅ Temp cleanup: ${deletedCount} vastgelopen uploads verwijderd.`);
+
+        console.log(`✅ Temp cleanup finished. ${deletedCount} files removed.`);
     } catch (e) {
         console.error('❌ Fout bij temp cleanup:', e);
     }
