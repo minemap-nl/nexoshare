@@ -20,7 +20,7 @@ FROM oven/bun:1-alpine
 WORKDIR /app/backend
 
 # Tijdzone data (vaak nodig)
-RUN apk add --no-cache tzdata
+RUN apk upgrade --no-cache && apk add --no-cache tzdata
 
 # Kopieer backend package config
 COPY backend/package.json backend/bun.lock ./

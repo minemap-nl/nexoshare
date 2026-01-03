@@ -33,7 +33,8 @@
   "overrides": {
     "cross-spawn": "^7.0.6",
     "glob": "^11.0.0",
-    "brace-expansion": "^2.0.2"
+    "brace-expansion": "^2.0.2",
+    "qs": "^6.14.1"
   },
   "devDependencies": {
     "@types/archiver": "^7.0.0",

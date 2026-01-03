@@ -641,7 +641,7 @@ async function getConfig() {
         return finalConfig;
     } catch (e) {
         console.error("GetConfig Error:", e);
-        return {};
+        throw e;
     }
 }
 
@@ -1812,13 +1812,18 @@ apiRouter.get('/auth/callback', async (req, res) => {
         const redirectUri = `${cleanUrl(config.appUrl)}/api/auth/callback`;
         console.log('[SSO DEBUG] Callback received.');
 
-        const tokenRes = await axios.post(`${issuerOrigin}/application/o/token/`, new URLSearchParams({
+        const tokenParams = new URLSearchParams({
             grant_type: 'authorization_code',
             code: code as string,
             redirect_uri: redirectUri,
             client_id: config.oidcClientId,
             client_secret: config.oidcSecret,
-        }), { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
+        });
+        console.log('[SSO DEBUG] Token Request Params:', tokenParams.toString());
+
+        const tokenRes = await axios.post(`${issuerOrigin}/application/o/token/`, tokenParams, {
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+        });
 
         const { access_token } = tokenRes.data;
         const userRes = await axios.get(`${issuerOrigin}/application/o/userinfo/`, {
@@ -2022,8 +2027,18 @@ apiRouter.put('/config', async (req, res) => {
 
     try {
         const currentConfig = await getConfig();
-        if (newConfig.smtpPass === '********') newConfig.smtpPass = currentConfig.smtpPass;
-        if (newConfig.oidcSecret === '********') newConfig.oidcSecret = currentConfig.oidcSecret;
+
+        // Prevent overwriting secrets with placeholders or empty strings if the intent was not to clear them
+        // If the new value is the placeholder '********', use the existing value
+        // If the new value is empty, only overwrite if we explicitly want to allow clearing secrets (which is rare for these fields via this endpoint)
+        // Note: For now, we assume empty string might be an accident if currentConfig exists.
+
+        if (!newConfig.smtpPass || newConfig.smtpPass === '********') {
+            newConfig.smtpPass = currentConfig.smtpPass;
+        }
+        if (!newConfig.oidcSecret || newConfig.oidcSecret === '********') {
+            newConfig.oidcSecret = currentConfig.oidcSecret;
+        }
 
         // Behoud setup_completed status tenzij expliciet meegegeven (voorkomt per ongeluk resetten)
         newConfig.setup_completed = currentConfig.setupCompleted;
