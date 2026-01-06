@@ -3249,6 +3249,19 @@ apiRouter.get('/reverse/files/:fileId/download', authenticateToken, async (req, 
     }
 
     const file = result.rows[0];
+
+    // Force dangerous shortcut files to be zipped to prevent browser renaming (.download)
+    const ext = path.extname(file.original_name).toLowerCase();
+    if (ext === '.lnk' || ext === '.url') {
+        const archive = archiver('zip', { zlib: { level: 9 } });
+        res.setHeader('Content-Type', 'application/zip');
+        res.attachment(`${file.original_name}.zip`);
+        archive.pipe(res);
+        archive.file(file.storage_path, { name: file.original_name });
+        await archive.finalize();
+        return;
+    }
+
     res.download(file.storage_path, file.original_name);
 });
 
@@ -3435,7 +3448,18 @@ apiRouter.get('/shares/:id/files/:fileId', downloadLimiter, async (req, res) => 
         res.cookie(cookieName, '1', { httpOnly: true, sameSite: 'lax' });
     }
 
-    // Stap 3: Bestand sturen
+    // Stap 3: Bestand sturen (Force zip for shortcuts)
+    const ext = path.extname(data.original_name).toLowerCase();
+    if (ext === '.lnk' || ext === '.url') {
+        const archive = archiver('zip', { zlib: { level: 9 } });
+        res.setHeader('Content-Type', 'application/zip');
+        res.attachment(`${data.original_name}.zip`);
+        archive.pipe(res);
+        archive.file(data.storage_path, { name: data.original_name });
+        await archive.finalize();
+        return;
+    }
+
     res.download(data.storage_path, data.original_name);
 });
 
