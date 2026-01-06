@@ -431,7 +431,8 @@ app.use((req, res, next) => {
 
         // SCRIPTS: Sta eigen scripts toe. 'unsafe-inline' is vaak nodig voor React/Vite in sommige setups.
         // Als je heel strikt wilt zijn, haal je 'unsafe-inline' weg, maar test dan goed!
-        "script-src 'self' 'unsafe-inline'",
+
+        "script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com https://cloudflareinsights.com",
 
         // STYLES: 'unsafe-inline' is nodig voor veel CSS-in-JS libraries en inline styles in React.
         "style-src 'self' 'unsafe-inline'",
@@ -444,7 +445,8 @@ app.use((req, res, next) => {
         // CONNECT (API & Fetch):
         // 'self' zorgt dat de frontend altijd met de eigen backend mag praten.
         // SSO redirects gebeHours via navigatie, dus die vallen hier niet onder (dat breekt niet).
-        "connect-src 'self'",
+
+        "connect-src 'self' https://cloudflareinsights.com https://static.cloudflareinsights.com",
 
         // FONTS:
         "font-src 'self' data:",
