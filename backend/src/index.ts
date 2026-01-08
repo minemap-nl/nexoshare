@@ -1808,7 +1808,8 @@ apiRouter.get('/auth/sso', async (req, res) => {
         res.redirect(targetUrl);
     } catch (e: any) {
         console.error('[SSO DEBUG] Error:', e.message);
-        res.status(500).send('SSO Error: ' + e.message);
+        console.error('[SSO DEBUG] Error:', e.message);
+        res.status(500).type('text/plain').send('SSO Error: ' + e.message);
     }
 });
 
@@ -1917,7 +1918,7 @@ apiRouter.get('/auth/callback', async (req, res) => {
             // Code fout
             console.error('Code Error:', e.message);
         }
-        res.status(500).send(`Login failed: ${e.message}`);
+        res.status(500).type('text/plain').send(`Login failed: ${e.message}`);
     }
 });
 
@@ -2535,6 +2536,7 @@ apiRouter.post('/shares/:id/chunk', authenticateToken, uploadLimiter, chunkUploa
     if (!isValidId(id)) return res.status(400).json({ error: 'Invalid Share ID format' });
 
     const { fileName, chunkIndex, fileId } = req.body;
+    if (!isValidId(fileId)) return res.status(400).json({ error: 'Invalid File ID format' });
 
     if (!req.file) return res.status(400).json({ error: 'No data' });
 
@@ -2575,6 +2577,10 @@ apiRouter.post('/shares/:id/finalize', authenticateToken, uploadLimiter, async (
     if (!isValidId(id)) return res.status(400).json({ error: 'Invalid Share ID format' });
 
     const { files } = req.body;
+    if (!Array.isArray(files)) return res.status(400).json({ error: 'Invalid files data' });
+    for (const f of files) {
+        if (!isValidId(f.fileId)) return res.status(400).json({ error: 'Invalid File ID format' });
+    }
     const authReq = req as AuthRequest;
 
     const client = await pool.connect();
@@ -2677,7 +2683,7 @@ apiRouter.post('/shares/:id/finalize', authenticateToken, uploadLimiter, async (
     }
 });
 
-apiRouter.put('/shares/:id', authenticateToken, checkUploadLimits, upload.array('files'), handleUploadId, async (req, res) => {
+apiRouter.put('/shares/:id', authenticateToken, uploadLimiter, checkUploadLimits, upload.array('files'), handleUploadId, async (req, res) => {
     const client = await pool.connect();
     const authReq = req as AuthRequest;
     try {
@@ -2810,7 +2816,7 @@ apiRouter.put('/shares/:id', authenticateToken, checkUploadLimits, upload.array(
                         [newId, finalName, safeOriginalName, sFile.size, sFile.mimeType, destPath]);
 
                 } catch (e) {
-                    console.error(`Failed to move staged file ${sFile.tempId}:`, e);
+                    console.error('Failed to move staged file', sFile.tempId, e);
                 }
             }
         }
@@ -2872,7 +2878,7 @@ apiRouter.post('/shares/:id/resend', authenticateToken, async (req, res) => {
 
 
 // STAGE: Bestanden samenvoegen in TEMP maar nog niet aan share koppelen (preview mogelijk maken)
-apiRouter.post('/shares/:id/stage', authenticateToken, async (req, res) => {
+apiRouter.post('/shares/:id/stage', authenticateToken, uploadLimiter, async (req, res) => {
     const { id } = req.params;
     const { files } = req.body; // Array of {fileName, fileId, size, totalChunks}
 
@@ -2948,7 +2954,7 @@ apiRouter.post('/shares/:id/stage', authenticateToken, async (req, res) => {
 });
 
 // PREVIEW STAGED FILE
-apiRouter.get('/shares/preview-stage/:tempId', authenticateToken, async (req, res) => {
+apiRouter.get('/shares/preview-stage/:tempId', authenticateToken, downloadLimiter, async (req, res) => {
     const { tempId } = req.params;
 
     // Security check: tempId mag geen slashes bevatten en moet beginnen met staged_
@@ -3075,7 +3081,7 @@ apiRouter.get('/shares/:id/download', downloadLimiter, async (req, res) => {
     }
 });
 
-apiRouter.delete('/shares/:id', authenticateToken, async (req, res) => {
+apiRouter.delete('/shares/:id', authenticateToken, uploadLimiter, async (req, res) => {
     const authReq = req as AuthRequest;
     const share = await pool.query('SELECT id FROM shares WHERE id = $1 AND user_id = $2', [authReq.params.id, authReq.user!.id]);
 
@@ -3084,7 +3090,7 @@ apiRouter.delete('/shares/:id', authenticateToken, async (req, res) => {
         try {
             await fs.rm(path.join(UPLOAD_DIR, authReq.params.id), { recursive: true, force: true });
         } catch (e: any) {
-            console.error(`⚠️ Couldn't delete files for ${authReq.params.id}:`, e.message);
+            console.error('⚠️ Couldn\'t delete files for', authReq.params.id, e.message);
             // We gaan wel door met DB verwijderen, anders blijft de share 'hangen' in de UI
         }
 
@@ -3096,7 +3102,7 @@ apiRouter.delete('/shares/:id', authenticateToken, async (req, res) => {
     }
 });
 
-apiRouter.delete('/shares/:id/files/:fileId', authenticateToken, async (req, res) => {
+apiRouter.delete('/shares/:id/files/:fileId', authenticateToken, uploadLimiter, async (req, res) => {
     const authReq = req as AuthRequest;
     const { id, fileId } = req.params;
 
@@ -3133,7 +3139,7 @@ apiRouter.delete('/shares/:id/files/:fileId', authenticateToken, async (req, res
     }
 });
 
-apiRouter.delete('/shares/:id/folder', authenticateToken, async (req, res) => {
+apiRouter.delete('/shares/:id/folder', authenticateToken, uploadLimiter, async (req, res) => {
     const authReq = req as AuthRequest;
     const { id } = req.params;
     const folderPath = req.query.path as string;
@@ -3577,6 +3583,7 @@ apiRouter.post('/public/reverse/:id/init', checkUploadLimits, uploadLimiter, asy
 apiRouter.post('/public/reverse/:id/chunk', checkUploadLimits, uploadLimiter, chunkUploadPublic.single('chunk'), async (req, res) => {
     const { id } = req.params;
     const { fileName, chunkIndex, fileId } = req.body;
+    if (!isValidId(fileId)) return res.status(400).json({ error: 'Invalid File ID format' });
 
     if (!req.file) return res.status(400).json({ error: 'No data' });
 
@@ -3649,6 +3656,10 @@ apiRouter.post('/public/reverse/:id/finalize', uploadLimiter, async (req, res) =
     if (!isValidId(id)) return res.status(400).json({ error: 'Invalid Share ID format' });
 
     const { files, password } = req.body;
+    if (!Array.isArray(files)) return res.status(400).json({ error: 'Invalid files data' });
+    for (const f of files) {
+        if (!isValidId(f.fileId)) return res.status(400).json({ error: 'Invalid File ID format' });
+    }
 
 
     const client = await pool.connect();
