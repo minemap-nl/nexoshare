@@ -81,6 +81,7 @@ interface AuthRequest extends Request { user?: JWTPayload; uploadId?: string; }
 
 // --- Config Defaults ---
 const app = express();
+app.disable('x-powered-by'); // Security: Hide Express
 const PORT = parseInt(process.env.PORT || '3001');
 const UPLOAD_DIR = path.resolve(process.env.UPLOAD_DIR || './uploads');
 const pendingUploads = new Map<string, number>(); // Track pending bytes per share ID
@@ -690,6 +691,12 @@ const isValidAppUrl = (url: string): boolean => {
     }
 };
 
+const isValidId = (id: string): boolean => {
+    if (!id || typeof id !== 'string') return false;
+    // Allow only alphanumeric chars and hyphens/underscores, max length 50
+    return /^[a-zA-Z0-9_\-]+$/.test(id) && id.length <= 50;
+};
+
 const isValidEmail = (email: string): boolean => {
     return validator.isEmail(email, {
         allow_utf8_local_part: false,
@@ -722,7 +729,9 @@ const generateBackupCodes = (): string[] => {
 // Encrypt sensitive data (for TOTP secrets and backup codes)
 const encryptData = (data: string): string => {
     const algorithm = 'aes-256-gcm';
-    const key = crypto.scryptSync(JWT_SECRET, 'salt', 32);
+    // FIX: Use random salt for each encryption
+    const salt = crypto.randomBytes(16);
+    const key = crypto.scryptSync(JWT_SECRET, salt, 32);
     const iv = crypto.randomBytes(16);
     const cipher = crypto.createCipheriv(algorithm, key, iv);
 
@@ -730,13 +739,29 @@ const encryptData = (data: string): string => {
     encrypted += cipher.final('hex');
     const authTag = cipher.getAuthTag().toString('hex');
 
-    return `${iv.toString('hex')}:${authTag}:${encrypted}`;
+    // Format: salt:iv:authTag:encrypted
+    return `${salt.toString('hex')}:${iv.toString('hex')}:${authTag}:${encrypted}`;
 };
 
 const decryptData = (encryptedData: string): string => {
     const algorithm = 'aes-256-gcm';
-    const key = crypto.scryptSync(JWT_SECRET, 'salt', 32);
-    const [ivHex, authTagHex, encrypted] = encryptedData.split(':');
+    const parts = encryptedData.split(':');
+
+    let salt, ivHex, authTagHex, encrypted;
+
+    if (parts.length === 4) {
+        // New format: salt:iv:authTag:encrypted
+        [salt, ivHex, authTagHex, encrypted] = parts;
+        salt = Buffer.from(salt, 'hex');
+    } else if (parts.length === 3) {
+        // Legacy format: iv:authTag:encrypted (uses hardcoded salt)
+        [ivHex, authTagHex, encrypted] = parts;
+        salt = 'salt'; // The old hardcoded salt string
+    } else {
+        throw new Error('Invalid encrypted data format');
+    }
+
+    const key = crypto.scryptSync(JWT_SECRET, salt, 32);
 
     const decipher = crypto.createDecipheriv(algorithm, key, Buffer.from(ivHex, 'hex'));
     decipher.setAuthTag(Buffer.from(authTagHex, 'hex'));
@@ -1777,7 +1802,7 @@ apiRouter.get('/auth/sso', async (req, res) => {
         const targetUrl = `${issuerOrigin}/application/o/authorize/?${params.toString()}`;
 
         // Zet een tijdelijke cookie om CSRF te voorkomen
-        res.cookie('sso_init', '1', { httpOnly: true, maxAge: 300000, sameSite: 'lax' });
+        res.cookie('sso_init', '1', { httpOnly: true, maxAge: 300000, sameSite: 'lax', secure: process.env.NODE_ENV === 'production' || config.secureCookies });
 
         console.log('[SSO DEBUG] Redirecting to:', targetUrl);
         res.redirect(targetUrl);
@@ -2505,6 +2530,10 @@ const chunkUploadPublic = multer({
 
 apiRouter.post('/shares/:id/chunk', authenticateToken, uploadLimiter, chunkUploadAuth.single('chunk'), async (req, res) => {
     const { id } = req.params;
+
+    // Security: Validate ID format before touching FS
+    if (!isValidId(id)) return res.status(400).json({ error: 'Invalid Share ID format' });
+
     const { fileName, chunkIndex, fileId } = req.body;
 
     if (!req.file) return res.status(400).json({ error: 'No data' });
@@ -2539,8 +2568,12 @@ apiRouter.post('/shares/:id/chunk', authenticateToken, uploadLimiter, chunkUploa
 });
 
 // STAP 3: Finalize (Verplaatsen, Scannen, Database, Email)
-apiRouter.post('/shares/:id/finalize', authenticateToken, async (req, res) => {
+apiRouter.post('/shares/:id/finalize', authenticateToken, uploadLimiter, async (req, res) => {
     const { id } = req.params;
+
+    // Security: Validate ID format
+    if (!isValidId(id)) return res.status(400).json({ error: 'Invalid Share ID format' });
+
     const { files } = req.body;
     const authReq = req as AuthRequest;
 
@@ -2950,6 +2983,7 @@ apiRouter.get('/shares/:id/download', downloadLimiter, async (req, res) => {
     res.on('finish', release); res.on('close', release); res.on('error', release);
 
     try {
+        const config = await getConfig();
         const { id } = req.params;
         const dlCookieName = `dl_${id}`; // Cookie voor teller
         const authCookieName = `share_auth_${id}`; // Cookie voor beveiliging
@@ -2991,7 +3025,7 @@ apiRouter.get('/shares/:id/download', downloadLimiter, async (req, res) => {
                  RETURNING download_count`, [id]
             );
             if (updateRes.rows.length === 0) { release(); return res.status(410).end(); }
-            res.cookie(dlCookieName, '1', { httpOnly: true, sameSite: 'lax' });
+            res.cookie(dlCookieName, '1', { httpOnly: true, sameSite: 'lax', secure: process.env.NODE_ENV === 'production' || config.secureCookies });
         } else {
             if (share.max_downloads && share.download_count >= share.max_downloads) {
                 // Optioneel: blokkeer als teller cookie er is maar max is bereikt
@@ -2999,7 +3033,7 @@ apiRouter.get('/shares/:id/download', downloadLimiter, async (req, res) => {
         }
 
         // 6. ZIP Genereren
-        const config = await getConfig();
+        // 6. ZIP Genereren
         const files = (await pool.query('SELECT * FROM files WHERE share_id = $1', [id])).rows;
         if (files.length === 0) { release(); return res.status(404).send('Empty'); }
 
@@ -3610,9 +3644,12 @@ apiRouter.post('/public/reverse/:id/chunk', checkUploadLimits, uploadLimiter, ch
 
 // STAP 3: Finalize Guest Upload
 // ROBUUSTE GAST UPLOAD - FINALIZE
-apiRouter.post('/public/reverse/:id/finalize', async (req, res) => {
+apiRouter.post('/public/reverse/:id/finalize', uploadLimiter, async (req, res) => {
     const { id } = req.params;
-    const { files } = req.body;
+    if (!isValidId(id)) return res.status(400).json({ error: 'Invalid Share ID format' });
+
+    const { files, password } = req.body;
+
 
     const client = await pool.connect();
 
