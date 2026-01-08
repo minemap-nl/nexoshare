@@ -600,10 +600,10 @@ const safeUnlink = async (filePath: string) => {
 
         // Ensure path is within allowed dirs
         if (!resolved.startsWith(allowUpload) && !resolved.startsWith(allowTemp)) {
-            console.error(`Blocked unsafe unlink: ${filePath}`);
+            console.error(`Blocked unsafe unlink: ${resolved}`);
             return;
         }
-        await fs.unlink(filePath).catch(() => { });
+        await fs.unlink(resolved).catch(() => { });
     } catch (e) {
         // Ignore errors if file doesn't exist or other issues
     }
@@ -1871,6 +1871,11 @@ apiRouter.get('/auth/sso', async (req, res) => {
         // Zet een tijdelijke cookie om CSRF te voorkomen
         res.cookie('sso_init', '1', { httpOnly: true, maxAge: 300000, sameSite: 'lax', secure: process.env.NODE_ENV === 'production' || config.secureCookies });
 
+        // Validate Target URL to prevent Open Redirect
+        if (!targetUrl.startsWith('http')) {
+            return res.status(500).send('Invalid Redirect URL');
+        }
+
         console.log('[SSO DEBUG] Redirecting to:', targetUrl);
         res.redirect(targetUrl);
     } catch (e: any) {
@@ -1968,7 +1973,11 @@ apiRouter.get('/auth/callback', async (req, res) => {
         // Cleanup expired tokens
         await pool.query('DELETE FROM sso_tokens WHERE expires_at < NOW()');
 
-        res.redirect(`${cleanUrl(config.appUrl)}/login?nonce=${nonce}`);
+        // Open Redirect Protection
+        const loginUrl = `${cleanUrl(config.appUrl)}/login?nonce=${nonce}`;
+        if (!loginUrl.startsWith('http')) return res.status(500).send('Invalid App URL');
+
+        res.redirect(loginUrl);
 
     } catch (e: any) {
         // BETERE ERROR LOGGING
@@ -2123,7 +2132,7 @@ apiRouter.put('/config', async (req, res) => {
     // Security: Validate Logo URL to prevent XSS
     if (newConfig.logoUrl && typeof newConfig.logoUrl === 'string') {
         const lower = newConfig.logoUrl.toLowerCase().trim();
-        if (lower.startsWith('javascript:') || lower.startsWith('vbscript:')) {
+        if (lower.startsWith('javascript:') || lower.startsWith('vbscript:') || lower.startsWith('data:')) {
             return res.status(400).json({ error: 'Invalid Logo URL' });
         }
     }
@@ -2670,33 +2679,13 @@ apiRouter.post('/shares/:id/finalize', authenticateToken, uploadLimiter, async (
 
         await client.query('BEGIN');
 
-        // FUNCTIE OM LOSSE DELEN SAMEN TE VOEGEN
-        const mergeParts = async (fileName: string, fileId: string, totalChunks: number, finalPath: string) => {
-            const { createReadStream, createWriteStream } = require('fs');
-            const dest = createWriteStream(finalPath);
-
-            for (let i = 0; i < totalChunks; i++) {
-                const partPath = path.join(TEMP_DIR, `${id}_${fileId}_${fileName}.part_${i}`);
-                try { await fs.access(partPath); } catch { dest.end(); throw new Error(`Missing part ${i} of ${fileName}`); }
-
-                await new Promise((resolve, reject) => {
-                    const source = createReadStream(partPath);
-                    source.on('error', reject);
-                    source.pipe(dest, { end: false });
-                    source.on('end', resolve);
-                });
-                await fs.unlink(partPath).catch(() => { }); // Opruimen
-            }
-            dest.end();
-            await new Promise(resolve => dest.on('finish', resolve));
-        };
-
         for (const f of files) {
             const safeFileName = path.basename(f.fileName);
-            const safeExt = path.extname(safeFileName);
-            const finalPath = path.join(shareDir, crypto.randomBytes(8).toString('hex') + safeExt);
+            const safeExtension = path.extname(safeFileName);
+            const finalPath = path.join(shareDir, crypto.randomBytes(8).toString('hex') + safeExtension);
 
-            // Bereken chunks voor merge
+            await mergeChunks(`${id}_${f.id}_${safeFileName}`, f.chunks, finalPath);
+
             const k = 1024;
             const sizeMap: any = { 'KB': k, 'MB': k * k, 'GB': k * k * k, 'TB': k * k * k * k };
             const chunkSizeVal = config.chunkSizeVal || 50;
@@ -3684,7 +3673,7 @@ apiRouter.post('/public/reverse/:id/chunk', checkUploadLimits, uploadLimiter, ch
         );
 
         if (shareCheck.rows.length === 0) {
-            await fs.unlink(req.file.path).catch(() => { });
+            await safeUnlink(req.file.path);
             return res.status(404).json({ error: 'Link not found' });
         }
 
@@ -3694,14 +3683,14 @@ apiRouter.post('/public/reverse/:id/chunk', checkUploadLimits, uploadLimiter, ch
             const cookies = parseCookies(req);
             const token = cookies[`rev_auth_${id}`];
             if (!token) {
-                await fs.unlink(req.file.path).catch(() => { });
+                await safeUnlink(req.file.path);
                 return res.status(403).json({ error: 'Password required' });
             }
             try {
                 const decoded: any = jwt.verify(token, JWT_SECRET);
                 if (decoded.shareId !== id) throw new Error();
             } catch {
-                await fs.unlink(req.file.path).catch(() => { });
+                await safeUnlink(req.file.path);
                 return res.status(403).json({ error: 'Session invalid' });
             }
         }
@@ -3713,7 +3702,7 @@ apiRouter.post('/public/reverse/:id/chunk', checkUploadLimits, uploadLimiter, ch
         // Bij de EERSTE chunk checken we of het totale bestand nog past
         if (parseInt(chunkIndex) === 0) {
             if (maxSize > 0 && currentDbUsage >= maxSize) {
-                await fs.unlink(req.file.path).catch(() => { });
+                await safeUnlink(req.file.path);
                 return res.status(413).json({ error: `Share limit exceeded.` });
             }
         }
@@ -3723,7 +3712,7 @@ apiRouter.post('/public/reverse/:id/chunk', checkUploadLimits, uploadLimiter, ch
 
         res.json({ success: true });
     } catch (e: any) {
-        if (req.file) await fs.unlink(req.file.path).catch(() => { });
+        if (req.file) await safeUnlink(req.file.path);
         console.error('Guest Chunk error:', e);
         res.status(500).json({ error: 'Chunk write failed' });
     }
