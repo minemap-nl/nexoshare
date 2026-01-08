@@ -840,11 +840,6 @@ const decryptData = (encryptedData: string): string => {
         // New format: salt:iv:authTag:encrypted
         [salt, ivHex, authTagHex, encrypted] = parts;
         salt = Buffer.from(salt, 'hex');
-    } else if (parts.length === 3) {
-        // Legacy format: iv:authTag:encrypted (uses hardcoded salt)
-        // nosemgrep: hardcoded-secret
-        [ivHex, authTagHex, encrypted] = parts;
-        salt = 'salt';
     } else {
         throw new Error('Invalid encrypted data format');
     }
@@ -1224,7 +1219,7 @@ apiRouter.post('/auth/login', loginLimiter, async (req, res) => {
             // Let op: we gebruiken hier de '15m' expiry van het tijdelijke token
             res.cookie('token', token, {
                 httpOnly: true,
-                secure: isProduction ? forceSecure : false,
+                secure: process.env.NODE_ENV === 'production',
                 sameSite: isProduction ? 'strict' : 'lax',
                 maxAge: 15 * 60 * 1000 // 15 Minutes
             });
@@ -1247,7 +1242,7 @@ apiRouter.post('/auth/login', loginLimiter, async (req, res) => {
 
         res.cookie('token', token, {
             httpOnly: true,
-            secure: isProduction ? forceSecure : false,
+            secure: process.env.NODE_ENV === 'production',
             sameSite: isProduction ? 'strict' : 'lax',
             maxAge: getTimeInMs(config.sessionVal, config.sessionUnit)
         });
@@ -1266,7 +1261,7 @@ apiRouter.post('/auth/logout', async (req, res) => {
         // 2. Clear de cookie met EXACT dezelfde instellingen als bij het inloggen
         res.clearCookie('token', {
             httpOnly: true,
-            secure: config.secureCookies, // Dynamisch: true in productie, false lokaal
+            secure: process.env.NODE_ENV === 'production',
             sameSite: 'strict',
             path: '/'
         });
@@ -1336,7 +1331,7 @@ apiRouter.post('/auth/verify-2fa', loginLimiter, async (req, res) => {
 
         res.cookie('token', token, {
             httpOnly: true,
-            secure: isProduction ? forceSecure : false,
+            secure: process.env.NODE_ENV === 'production',
             sameSite: isProduction ? 'strict' : 'lax',
             maxAge: getTimeInMs(config.sessionVal, config.sessionUnit)
         });
@@ -1674,7 +1669,7 @@ apiRouter.post('/passkeys/auth/verify', async (req, res) => {
 
             res.cookie('token', token, {
                 httpOnly: true,
-                secure: isProduction ? forceSecure : false,
+                secure: process.env.NODE_ENV === 'production',
                 sameSite: isProduction ? 'strict' : 'lax',
                 maxAge: getTimeInMs(config.sessionVal, config.sessionUnit)
             });
@@ -1831,7 +1826,8 @@ apiRouter.get('/auth/check-2fa-requirement', authenticateToken, async (req, res)
 
 // --- Utility Route voor ID generatie (Idee: ID Feature) ---
 apiRouter.get('/utils/generate-id', authenticateToken, async (req, res) => {
-    const rawLen = req.query.length;
+    const queryLen = req.query.length;
+    const rawLen = (typeof queryLen === 'string') ? queryLen : '12';
     const length = parseInt(typeof rawLen === 'string' ? rawLen : '12') || 12;
     // Cap length voor veiligheid
     const safeLength = Math.min(Math.max(length, 8), 64);
@@ -2056,7 +2052,7 @@ apiRouter.post('/auth/sso-exchange', async (req, res) => {
 
         res.cookie('token', token, {
             httpOnly: true,
-            secure: isProduction ? forceSecure : false,
+            secure: process.env.NODE_ENV === 'production',
             sameSite: isProduction ? 'strict' : 'lax',
             maxAge: getTimeInMs(config.sessionVal, config.sessionUnit)
         });
@@ -2372,7 +2368,7 @@ apiRouter.put('/users/profile', authenticateToken, async (req, res) => {
 
         res.cookie('token', token, {
             httpOnly: true,
-            secure: isProduction ? forceSecure : false,
+            secure: process.env.NODE_ENV === 'production',
             sameSite: isProduction ? 'strict' : 'lax',
             maxAge: getTimeInMs(config.sessionVal, config.sessionUnit)
         });
@@ -3487,7 +3483,7 @@ apiRouter.post('/shares/:id/verify', loginLimiter, async (req, res) => {
         // Zet een HTTP-Only cookie die specifiek is voor deze share
         res.cookie(`share_auth_${id}`, accessToken, {
             httpOnly: true,
-            secure: isProduction ? forceSecure : false,
+            secure: process.env.NODE_ENV === 'production',
             sameSite: 'lax', // Lax is nodig zodat de cookie wordt meegestuurd bij normale link-navigatie (downloaden)
             maxAge: 3600000 // 1 uur
         });
@@ -3631,7 +3627,7 @@ apiRouter.post('/public/reverse/:id/verify', loginLimiter, async (req, res) => {
 
         res.cookie(`rev_auth_${id}`, token, {
             httpOnly: true,
-            secure: isProduction ? forceSecure : false,
+            secure: process.env.NODE_ENV === 'production',
             sameSite: 'strict',
             maxAge: 3600000
         });
