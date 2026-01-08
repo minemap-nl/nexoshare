@@ -1828,11 +1828,14 @@ apiRouter.get('/auth/check-2fa-requirement', authenticateToken, async (req, res)
 // --- Utility Route voor ID generatie (Idee: ID Feature) ---
 apiRouter.get('/utils/generate-id', authenticateToken, async (req, res) => {
     const queryLen = req.query.length;
-    // Explicit string cast before int parse for Snyk compliance
-    const rawLen = String(queryLen || '12');
-    const length = parseInt(rawLen, 10);
-    // Cap length voor veiligheid
-    const safeLength = Math.min(Math.max(length, 8), 64);
+    // Use Zod for strict input validation (Snyk Compliance)
+    const schema = z.object({
+        length: z.coerce.number().int().min(8).max(64).default(12)
+    });
+
+    const result = schema.safeParse(req.query);
+    const safeLength = result.success ? result.data.length : 12;
+
     const id = crypto.randomBytes(Math.ceil(safeLength / 2)).toString('hex').slice(0, safeLength);
     res.json({ id });
 });
@@ -1892,7 +1895,12 @@ apiRouter.get('/auth/sso', async (req, res) => {
         // Validate Target URL to prevent Open Redirect
         // Validate Target URL to prevent Open Redirect
         // Strictly allow only http/https protocols using validator
-        if (!validator.isURL(targetUrl, { protocols: ['http', 'https'], require_protocol: true })) {
+        // Validate Target URL to prevent Open Redirect (Zod Strict)
+        const urlSchema = z.string().url().refine((val) => val.startsWith('http://') || val.startsWith('https://'), {
+            message: "Must be HTTP or HTTPS"
+        });
+
+        if (!urlSchema.safeParse(targetUrl).success) {
             return res.status(500).send('Invalid Redirect URL');
         }
 
@@ -1993,10 +2001,13 @@ apiRouter.get('/auth/callback', async (req, res) => {
         // Cleanup expired tokens
         await pool.query('DELETE FROM sso_tokens WHERE expires_at < NOW()');
 
-        // Open Redirect Protection
-        // Open Redirect Protection
+        // Open Redirect Protection (Zod Strict)
         const loginUrl = `${cleanUrl(config.appUrl)}/login?nonce=${nonce}`;
-        if (!validator.isURL(loginUrl, { protocols: ['http', 'https'], require_protocol: true })) {
+        const urlSchema = z.string().url().refine((val) => val.startsWith('http://') || val.startsWith('https://'), {
+            message: "Must be HTTP or HTTPS"
+        });
+
+        if (!urlSchema.safeParse(loginUrl).success) {
             return res.status(500).send('Invalid App URL');
         }
 

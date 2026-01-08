@@ -742,6 +742,7 @@ const ProfileView = ({ user, config, forcedSetup = false, onComplete }: { user: 
         const a = document.createElement('a');
         a.href = url;
         const safeAppName = sanitizeAppName(config.appName || 'Nexo Share');
+        // Explicit string template to break potential type taint
         a.download = `${safeAppName}-backup-codes.txt`;
         document.body.appendChild(a);
         a.click();
@@ -937,7 +938,7 @@ const ProfileView = ({ user, config, forcedSetup = false, onComplete }: { user: 
 
                                         {/* Witte achtergrond voor QR zorgt voor beter contrast */}
                                         <div className="bg-white p-2 rounded-lg mb-4 flex justify-center">
-                                            {isValidQrUrl(twoFactorQR!) && <img src={twoFactorQR!} className="rounded max-h-48" alt="2FA QR Code" />}
+                                            {isValidQrUrl(twoFactorQR!) ? <img src={twoFactorQR} className="rounded max-h-48" alt="2FA QR Code" /> : null}
                                         </div>
 
                                         <div className="bg-black rounded-lg p-3 mb-4 border border-neutral-800">
@@ -1579,7 +1580,7 @@ const UploadView = () => {
                                 }
                             }}
                         >
-                            {isValidQrUrl(qrCode!) && <img src={qrCode!} alt="QR Code" className="w-32 h-32" />}
+                            {isValidQrUrl(qrCode!) ? <img src={qrCode} alt="QR Code" className="w-32 h-32" /> : null}
 
                             {/* Hover Overlay */}
                             <div className="absolute inset-0 bg-black/0 group-hover:bg-black/10 rounded-xl flex items-center justify-center transition-colors">
@@ -2540,7 +2541,7 @@ const ReverseView = () => {
                                     {!item.isDirectory && (
                                         <>
                                             <button onClick={() => preview(`${API_URL}/reverse/files/${item.id}/download`, item.name)} className="text-neutral-500 hover:text-white transition p-2 rounded hover:bg-neutral-800 flex-shrink-0" title="Preview"><Eye className="w-4 h-4" /></button>
-                                            <a href={`${API_URL}/reverse/files/${item.id}/download`} className="text-purple-400 hover:text-white transition p-2 rounded hover:bg-neutral-800 flex-shrink-0"><Download className="w-4 h-4" /></a>
+                                            <a href={`${API_URL}/reverse/files/${encodeURIComponent(item.id)}/download`} className="text-purple-400 hover:text-white transition p-2 rounded hover:bg-neutral-800 flex-shrink-0"><Download className="w-4 h-4" /></a>
                                         </>
                                     )}
                                 </div>
@@ -4136,7 +4137,7 @@ const LoginPage = ({ onLogin }: any) => {
             <div className="absolute top-0 left-0 w-full h-full bg-[radial-gradient(circle_at_50%_120%,rgba(120,50,255,0.1),rgba(0,0,0,0))]"></div>
             <form onSubmit={twoFactorRequired ? handleVerify2FA : handleSubmit} className="bg-neutral-900 p-6 md:p-10 rounded-2xl w-full max-w-md border border-neutral-800 shadow-2xl relative z-10 anim-scale mb-8">
                 <div className="flex justify-center mb-8">
-                    {config.logoUrl ? <img src={config.logoUrl} className="h-16" alt="Logo" /> : <div className="bg-gradient-to-br from-purple-600 to-blue-600 p-4 rounded-2xl shadow-xl shadow-purple-900/30"><Share2 className="w-10 h-10 text-white" /></div>}
+                    {(config.logoUrl && isValidHttpUrl(config.logoUrl)) ? <img src={config.logoUrl} className="h-16" alt="Logo" /> : <div className="bg-gradient-to-br from-purple-600 to-blue-600 p-4 rounded-2xl shadow-xl shadow-purple-900/30"><Share2 className="w-10 h-10 text-white" /></div>}
                 </div>
                 <h1 className="text-3xl font-bold text-white mb-8 text-center">Welcome to {config.appName || 'Nexo Share'}</h1>
 
@@ -4847,7 +4848,7 @@ const DownloadPage = () => {
                                                     <Eye className="w-4 h-4" />
                                                 </button>
                                                 <a
-                                                    href={`${API_URL}/shares/${id}/files/${item.id}`}
+                                                    href={`${API_URL}/shares/${encodeURIComponent(id!)}/files/${encodeURIComponent(item.id)}`}
                                                     target="_blank"
                                                     rel="noopener noreferrer"
                                                     className="text-purple-400 hover:text-white p-2 rounded hover:bg-neutral-800 transition flex-shrink-0"
@@ -4862,7 +4863,7 @@ const DownloadPage = () => {
                             })}
                         </div>
                         <a
-                            href={`${API_URL}/shares/${id}/download`}
+                            href={`${API_URL}/shares/${encodeURIComponent(id!)}/download`}
                             target="_blank"             // Opent in nieuw tabblad
                             rel="noopener noreferrer"
                             className="block w-full bg-gradient-to-br from-purple-600 to-blue-600 hover:brightness-90 text-center text-white font-bold py-3 rounded-lg transition btn-press shadow-lg shadow-green-900/20"
