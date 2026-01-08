@@ -589,6 +589,72 @@ const getBytes = (val: number, unit: string) => {
     return val * (map[unit] || k * k * k);
 };
 
+// --- Security Helpers ---
+
+// Safe Unlink: Prevents deleting files outside allowed directories
+const safeUnlink = async (filePath: string) => {
+    try {
+        const resolved = path.resolve(filePath);
+        const allowUpload = path.resolve(UPLOAD_DIR);
+        const allowTemp = path.resolve(TEMP_DIR);
+
+        // Ensure path is within allowed dirs
+        if (!resolved.startsWith(allowUpload) && !resolved.startsWith(allowTemp)) {
+            console.error(`Blocked unsafe unlink: ${filePath}`);
+            return;
+        }
+        await fs.unlink(filePath).catch(() => { });
+    } catch (e) {
+        // Ignore errors if file doesn't exist or other issues
+    }
+};
+
+// Consolidated Merge Logic
+const mergeChunks = async (partPrefix: string, totalChunks: number, finalPath: string) => {
+    const { createReadStream, createWriteStream } = require('fs');
+    const dest = createWriteStream(finalPath);
+    let errorOccurred = false;
+
+    for (let i = 0; i < totalChunks; i++) {
+        if (errorOccurred) break;
+
+        // Construct part path using the safe prefix provided by caller
+        // Example prefix: "temp_dir/shareid_fileid_filename"
+        const partPath = `${partPrefix}.part_${i}`;
+
+        try {
+            await fs.access(partPath);
+        } catch {
+            dest.end();
+            throw new Error(`Missing part ${i}. Upload incomplete.`);
+        }
+
+        await new Promise((resolve, reject) => {
+            const source = createReadStream(partPath);
+            source.on('error', (err: any) => {
+                errorOccurred = true;
+                reject(err);
+            });
+            source.pipe(dest, { end: false });
+            source.on('end', resolve);
+        });
+
+        await safeUnlink(partPath);
+    }
+
+    dest.end();
+    if (errorOccurred) {
+        // Cleanup destination if failed
+        await safeUnlink(finalPath);
+        throw new Error('Merge failed');
+    }
+
+    await new Promise((resolve, reject) => {
+        dest.on('finish', resolve);
+        dest.on('error', reject);
+    });
+};
+
 // --- Global Cache Variables ---
 let configCache: any = null;
 let configCacheTime = 0;
@@ -755,8 +821,9 @@ const decryptData = (encryptedData: string): string => {
         salt = Buffer.from(salt, 'hex');
     } else if (parts.length === 3) {
         // Legacy format: iv:authTag:encrypted (uses hardcoded salt)
+        // nosemgrep: hardcoded-secret - This is required for backward compatibility with older files
         [ivHex, authTagHex, encrypted] = parts;
-        salt = 'salt'; // The old hardcoded salt string
+        salt = 'salt';
     } else {
         throw new Error('Invalid encrypted data format');
     }
@@ -2053,6 +2120,14 @@ apiRouter.put('/config', async (req, res) => {
     const authReq = req as AuthRequest;
     const newConfig = authReq.body;
 
+    // Security: Validate Logo URL to prevent XSS
+    if (newConfig.logoUrl && typeof newConfig.logoUrl === 'string') {
+        const lower = newConfig.logoUrl.toLowerCase().trim();
+        if (lower.startsWith('javascript:') || lower.startsWith('vbscript:')) {
+            return res.status(400).json({ error: 'Invalid Logo URL' });
+        }
+    }
+
     try {
         const currentConfig = await getConfig();
 
@@ -2553,7 +2628,7 @@ apiRouter.post('/shares/:id/chunk', authenticateToken, uploadLimiter, chunkUploa
             const usageRes = await pool.query('SELECT COALESCE(SUM(size), 0) as total FROM files WHERE share_id = $1', [id]);
             const currentTotal = parseInt(usageRes.rows[0].total);
             if (currentTotal + req.file.size > maxBytes) {
-                await fs.unlink(req.file.path).catch(() => { });
+                await safeUnlink(req.file.path);
                 return res.status(413).json({ error: `Share limit exceeded.` });
             }
         }
@@ -2563,7 +2638,7 @@ apiRouter.post('/shares/:id/chunk', authenticateToken, uploadLimiter, chunkUploa
 
         res.json({ success: true });
     } catch (e) {
-        if (req.file) await fs.unlink(req.file.path).catch(() => { });
+        if (req.file) await safeUnlink(req.file.path);
         console.error('Chunk error:', e);
         res.status(500).json({ error: 'Chunk write failed' });
     }
@@ -2635,11 +2710,11 @@ apiRouter.post('/shares/:id/finalize', authenticateToken, uploadLimiter, async (
             if (clamscanInstance) {
                 const result = await clamscanInstance.isInfected(finalPath);
                 if (result.isInfected) {
-                    await fs.unlink(finalPath).catch(() => { });
+                    await safeUnlink(finalPath);
                     throw new Error(`Virus detected in ${f.originalName}!`);
                 }
             } else if (config.clamavMustScan) {
-                await fs.unlink(finalPath).catch(() => { });
+                await safeUnlink(finalPath);
                 throw new Error("Virus scanner unavailable, upload refused.");
             }
 
@@ -2896,6 +2971,11 @@ apiRouter.post('/shares/:id/stage', authenticateToken, uploadLimiter, async (req
         const CHUNK_SIZE = chunkSizeVal * (sizeMap[chunkSizeUnit] || sizeMap['MB']);
 
         for (const f of files) {
+            if (!isValidId(f.fileId)) {
+                console.error(`Invalid fileId in stage: ${f.fileId}`);
+                continue; // Skip invalid files
+            }
+
             const safeFileName = path.basename(f.fileName);
             // SECURITY: Generate a random ID to prevent file prediction/enumeration
             const randomId = crypto.randomBytes(16).toString('hex');
@@ -2906,34 +2986,16 @@ apiRouter.post('/shares/:id/stage', authenticateToken, uploadLimiter, async (req
             const finalPath = path.join(TEMP_DIR, stagedName);
             const totalChunks = Math.ceil(f.size / CHUNK_SIZE);
 
-            // Merge logic duplicating existing code... ideally refactor to helper
-            const { createReadStream, createWriteStream } = require('fs');
-            const dest = createWriteStream(finalPath);
-
-            for (let i = 0; i < totalChunks; i++) {
-                const partPath = path.join(TEMP_DIR, `${id}_${f.fileId}_${safeFileName}.part_${i}`);
-                try { await fs.access(partPath); } catch {
-                    // Als part mist, fail
-                    dest.end();
-                    throw new Error(`Missing part ${i} of ${f.fileName}`);
-                }
-
-                await new Promise((resolve, reject) => {
-                    const source = createReadStream(partPath);
-                    source.on('error', reject);
-                    source.pipe(dest, { end: false });
-                    source.on('end', resolve);
-                });
-                await fs.unlink(partPath).catch(() => { });
-            }
-            dest.end();
-            await new Promise(resolve => dest.on('finish', resolve));
+            // Use global merge logic
+            // Prefix: TEMP_DIR/id_fileId_safeFileName
+            const partPrefix = path.join(TEMP_DIR, `${id}_${f.fileId}_${safeFileName}`);
+            await mergeChunks(partPrefix, totalChunks, finalPath);
 
             // SCAN
             if (clamscanInstance) {
                 const result = await clamscanInstance.isInfected(finalPath);
                 if (result.isInfected) {
-                    await fs.unlink(finalPath).catch(() => { });
+                    await safeUnlink(finalPath);
                     throw new Error(`Virus detected in ${f.fileName}!`);
                 }
             }
@@ -2957,12 +3019,18 @@ apiRouter.post('/shares/:id/stage', authenticateToken, uploadLimiter, async (req
 apiRouter.get('/shares/preview-stage/:tempId', authenticateToken, downloadLimiter, async (req, res) => {
     const { tempId } = req.params;
 
-    // Security check: tempId mag geen slashes bevatten en moet beginnen met staged_
-    if (!tempId || tempId.includes('/') || tempId.includes('\\') || !tempId.startsWith('staged_')) {
+    // Security check: tempId regex validation (staged_HEX.ext)
+    const tempIdRegex = /^staged_[a-f0-9]{32}(\.[a-zA-Z0-9]+)?$/;
+    if (!tempId || !tempIdRegex.test(tempId)) {
         return res.status(403).send('Invalid file');
     }
 
     const filePath = path.join(TEMP_DIR, tempId);
+
+    // Extra path traversal check
+    if (!path.resolve(filePath).startsWith(path.resolve(TEMP_DIR))) {
+        return res.status(403).send('Invalid path');
+    }
     try {
         await fs.access(filePath);
 
@@ -3115,7 +3183,7 @@ apiRouter.delete('/shares/:id/files/:fileId', authenticateToken, uploadLimiter, 
     if (file.rows.length > 0) {
         // 2. Verwijder bestand uit DB en disk
         await pool.query('DELETE FROM files WHERE id = $1', [fileId]);
-        try { await fs.unlink(file.rows[0].storage_path); } catch (e) { }
+        if (file.rows[0].storage_path) await safeUnlink(file.rows[0].storage_path);
 
         const remaining = await pool.query('SELECT COUNT(*) FROM files WHERE share_id = $1', [id]);
         const count = parseInt(remaining.rows[0].count);
@@ -3172,7 +3240,7 @@ apiRouter.delete('/shares/:id/folder', authenticateToken, uploadLimiter, async (
         // 3. Delete files from DB & Disk
         for (const file of fileRes.rows) {
             await pool.query('DELETE FROM files WHERE id = $1', [file.id]);
-            await fs.unlink(file.storage_path).catch(() => { });
+            if (file.storage_path) await safeUnlink(file.storage_path);
         }
 
         // 4. Try to remove the physical folder structure if it exists (best effort)
@@ -3274,7 +3342,7 @@ apiRouter.get('/reverse/:id/files', authenticateToken, async (req, res) => {
     res.json(files.rows);
 });
 
-apiRouter.get('/reverse/files/:fileId/download', authenticateToken, async (req, res) => {
+apiRouter.get('/reverse/files/:fileId/download', authenticateToken, downloadLimiter, async (req, res) => {
     const authReq = req as AuthRequest;
 
     // Check of de file bestaat EN of de huidige user eigenaar is van de reverse share
@@ -3304,11 +3372,17 @@ apiRouter.get('/reverse/files/:fileId/download', authenticateToken, async (req, 
         return;
     }
 
+    // Security: Validate path is within UPLOAD_DIR
+    const resolvedPath = path.resolve(file.storage_path);
+    if (!resolvedPath.startsWith(path.resolve(UPLOAD_DIR))) {
+        return res.status(500).json({ error: 'File path security violation' });
+    }
+
     res.download(file.storage_path, file.original_name);
 });
 
 // 2. Download ALLES als ZIP uit Reverse Share (Authenticated)
-apiRouter.get('/reverse/:id/download', authenticateToken, async (req, res) => {
+apiRouter.get('/reverse/:id/download', authenticateToken, downloadLimiter, async (req, res) => {
     // Wacht op queue
     try {
         await zipQueue.wait();
@@ -3500,6 +3574,12 @@ apiRouter.get('/shares/:id/files/:fileId', downloadLimiter, async (req, res) => 
         archive.file(data.storage_path, { name: data.original_name });
         await archive.finalize();
         return;
+    }
+
+    // Security: Validate path is within UPLOAD_DIR
+    const resolvedPath = path.resolve(data.storage_path);
+    if (!resolvedPath.startsWith(path.resolve(UPLOAD_DIR))) {
+        return res.status(500).send('File path security violation');
     }
 
     res.download(data.storage_path, data.original_name);
@@ -3696,31 +3776,6 @@ apiRouter.post('/public/reverse/:id/finalize', uploadLimiter, async (req, res) =
 
         await client.query('BEGIN');
 
-        // 2. Helper functie om delen samen te voegen
-        const mergeParts = async (fileName: string, fileId: string, totalChunks: number, finalPath: string) => {
-            const { createReadStream, createWriteStream } = require('fs');
-            const dest = createWriteStream(finalPath);
-
-            for (let i = 0; i < totalChunks; i++) {
-                const partPath = path.join(TEMP_DIR, `rev_${id}_${fileId}_${fileName}.part_${i}`);
-                try {
-                    await fs.access(partPath);
-                } catch {
-                    dest.end();
-                    throw new Error(`Part ${i} of ${fileName} is missing. Upload incomplete.`);
-                }
-                await new Promise((resolve, reject) => {
-                    const source = createReadStream(partPath);
-                    source.on('error', reject);
-                    source.pipe(dest, { end: false });
-                    source.on('end', resolve);
-                });
-                await fs.unlink(partPath).catch(() => { }); // Opruimen
-            }
-            dest.end();
-            await new Promise(resolve => dest.on('finish', resolve));
-        };
-
         // 3. Verwerken van bestanden
         for (const f of files) {
             // Bereken chunks
@@ -3739,23 +3794,27 @@ apiRouter.post('/public/reverse/:id/finalize', uploadLimiter, async (req, res) =
             const finalPath = path.join(GUEST_DIR, uniqueName);
 
             // Voeg samen
-            await mergeParts(f.fileName, f.fileId, totalChunks, finalPath);
+            const safeChunkName = path.basename(f.fileName);
+            // Prefix for guest: rev_id_fileId_safeChunkName
+            const partPrefix = path.join(TEMP_DIR, `rev_${id}_${f.fileId}_${safeChunkName}`);
+
+            await mergeChunks(partPrefix, totalChunks, finalPath);
 
             // Virusscan & Extensie check
             if (clamscanInstance) {
                 const result = await clamscanInstance.isInfected(finalPath);
                 if (result.isInfected) {
-                    await fs.unlink(finalPath).catch(() => { });
+                    await safeUnlink(finalPath);
                     throw new Error(`Virus in ${f.originalName}!`);
                 }
             } else if (config.clamavMustScan) {
-                await fs.unlink(finalPath).catch(() => { });
+                await safeUnlink(finalPath);
                 throw new Error("Security error: Virus scanner is unavailable.");
             }
 
             const dangerousTypes = ['.exe', '.bat', '.cmd', '.sh', '.php', '.pl', '.py', '.cgi', '.jar', '.msi', '.com', '.scr', '.hta'];
             if (dangerousTypes.includes(path.extname(safeOriginalName).toLowerCase())) {
-                await fs.unlink(finalPath).catch(() => { });
+                await safeUnlink(finalPath);
                 throw new Error(`Security violation: File type not allowed.`);
             }
 
@@ -4121,7 +4180,7 @@ async function initDB() {
                 }, express.static(SYSTEM_DIR));
                 app.use(express.static(path.join(__dirname, '../../frontend/dist')));
 
-                app.get(/(.*)/, async (req, res) => {
+                app.get(/(.*)/, publicLimiter, async (req, res) => {
                     try {
                         const indexPath = path.join(__dirname, '../../frontend/dist/index.html');
                         try {
