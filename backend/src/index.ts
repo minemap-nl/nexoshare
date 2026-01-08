@@ -160,7 +160,8 @@ new NodeClam().init({
     console.warn("   Virusscanning is turned off.");
 });
 
-const isPrivateIP = (host: string) => {
+const isPrivateIP = (host: string | any) => {
+    if (!host || typeof host !== 'string') return true;
     // 0. Blokkeer vreemde formaten (Hex, Octal, Integer IPs)
     if (!/^[a-zA-Z0-9.:-]+$/.test(host)) return true;
 
@@ -571,7 +572,7 @@ const formatBytes = (bytes: number, decimals = 2) => {
 };
 
 const getTimeInMs = (val: number, unit: string) => {
-    const u = unit.toLowerCase();
+    const u = (typeof unit === 'string') ? unit.toLowerCase() : 'days';
     const map: any = {
         'minute': 60000, 'minutes': 60000,
         'hour': 3600000, 'hours': 3600000,
@@ -720,8 +721,8 @@ const generateSecureId = async () => {
     return crypto.randomBytes(Math.ceil(len / 2)).toString('hex').slice(0, len);
 };
 
-const escapeHtml = (unsafe: string) => {
-    if (!unsafe) return "";
+const escapeHtml = (unsafe: string | any) => {
+    if (!unsafe || typeof unsafe !== 'string') return "";
     return unsafe.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
 };
 
@@ -770,8 +771,8 @@ const isValidEmail = (email: string): boolean => {
     });
 };
 
-const validateAndSplitEmails = (emailString: string): string[] => {
-    if (!emailString) return [];
+const validateAndSplitEmails = (emailString: string | any): string[] => {
+    if (!emailString || typeof emailString !== 'string') return [];
     const emails = emailString.split(',').map(e => e.trim()).filter(e => e.length > 0);
     return emails.filter(email => {
         if (!isValidEmail(email)) {
@@ -1037,7 +1038,7 @@ const handleUploadId: RequestHandler = async (req, res, next) => {
     // Bij multer uploads is body al geparsed, maar we moeten wel checken of het bestaat
     const customSlug = authReq.body?.customSlug;
 
-    if (customSlug && customSlug.trim() !== '') {
+    if (customSlug && typeof customSlug === 'string' && customSlug.trim() !== '') {
         const slug = customSlug.trim();
         if (!isValidSlug(slug)) {
             return res.status(400).json({ error: 'Link may only contain letters, numbers and hyphens.' });
@@ -1087,7 +1088,7 @@ const scanFiles = async (files: Express.Multer.File[]) => {
         try {
             const result = await clamscanInstance.isInfected(file.path);
             if (result.isInfected) {
-                await fs.unlink(file.path).catch(() => { });
+                await safeUnlink(file.path);
                 throw new Error(`Virus detected in ${file.originalname}! Upload refused.`);
             }
         } catch (e: any) {
@@ -1810,7 +1811,8 @@ apiRouter.get('/auth/check-2fa-requirement', authenticateToken, async (req, res)
 
 // --- Utility Route voor ID generatie (Idee: ID Feature) ---
 apiRouter.get('/utils/generate-id', authenticateToken, async (req, res) => {
-    const length = parseInt(req.query.length as string) || 12;
+    const rawLen = req.query.length;
+    const length = parseInt(typeof rawLen === 'string' ? rawLen : '12') || 12;
     // Cap length voor veiligheid
     const safeLength = Math.min(Math.max(length, 8), 64);
     const id = crypto.randomBytes(Math.ceil(safeLength / 2)).toString('hex').slice(0, safeLength);
@@ -2693,7 +2695,7 @@ apiRouter.post('/shares/:id/finalize', authenticateToken, uploadLimiter, async (
             const CHUNK_SIZE = chunkSizeVal * (sizeMap[chunkSizeUnit] || sizeMap['MB']);
             const totalChunks = Math.ceil(f.size / CHUNK_SIZE);
 
-            await mergeParts(safeFileName, f.fileId, totalChunks, finalPath);
+
 
             // VIRUSSCAN
             if (clamscanInstance) {
@@ -2785,7 +2787,7 @@ apiRouter.put('/shares/:id', authenticateToken, uploadLimiter, checkUploadLimits
         if (remove_password === 'true' || remove_password === true) {
             // Password verwijderen
             updates.push(`password_hash = NULL`);
-        } else if (password && password.trim() !== '') {
+        } else if (password && typeof password === 'string' && password.trim() !== '') {
             // Nieuw Password instellen
             const hash = await Bun.password.hash(password);
             updates.push(`password_hash = $${i++}`);
@@ -2892,7 +2894,7 @@ apiRouter.put('/shares/:id', authenticateToken, uploadLimiter, checkUploadLimits
         if (authReq.files && Array.isArray(authReq.files)) {
             for (const f of authReq.files as Express.Multer.File[]) {
                 // We proberen elk geüpload bestand direct weer te verwijderen
-                await fs.unlink(f.path).catch(() => { });
+                await safeUnlink(f.path);
             }
         }
         console.error('Share update error:', e);
@@ -2926,7 +2928,7 @@ apiRouter.post('/shares/:id/resend', authenticateToken, async (req, res) => {
 
     if (recipients) {
         const list = validateAndSplitEmails(recipients);
-        if (list.length === 0 && recipients.trim().length > 0) {
+        if (list.length === 0 && typeof recipients === 'string' && recipients.trim().length > 0) {
             return res.status(400).json({ error: 'No valid email addresses found' });
         }
         // Try/Catch om crash te voorkomen bij SMTP errors
@@ -3367,7 +3369,7 @@ apiRouter.get('/reverse/files/:fileId/download', authenticateToken, downloadLimi
         return res.status(500).json({ error: 'File path security violation' });
     }
 
-    res.download(file.storage_path, file.original_name);
+    res.download(resolvedPath, file.original_name);
 });
 
 // 2. Download ALLES als ZIP uit Reverse Share (Authenticated)
@@ -3549,8 +3551,8 @@ apiRouter.get('/shares/:id/files/:fileId', downloadLimiter, async (req, res) => 
             return res.status(410).end();
         }
 
-        // Cookie zetten
-        res.cookie(cookieName, '1', { httpOnly: true, sameSite: 'lax' });
+        // Cookie zetten - Forceer secure in productie
+        res.cookie(cookieName, '1', { httpOnly: true, sameSite: 'lax', secure: process.env.NODE_ENV === 'production' });
     }
 
     // Stap 3: Bestand sturen (Force zip for shortcuts)
@@ -3571,7 +3573,7 @@ apiRouter.get('/shares/:id/files/:fileId', downloadLimiter, async (req, res) => 
         return res.status(500).send('File path security violation');
     }
 
-    res.download(data.storage_path, data.original_name);
+    res.download(resolvedPath, data.original_name);
 });
 
 // GUEST UPLOAD
