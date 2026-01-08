@@ -613,25 +613,41 @@ const safeUnlink = async (filePath: string) => {
 // Consolidated Merge Logic
 const mergeChunks = async (partPrefix: string, totalChunks: number, finalPath: string) => {
     const { createReadStream, createWriteStream } = require('fs');
-    const dest = createWriteStream(finalPath);
+
+    // Security: Validate strict path containment
+    const resolvedFinal = path.resolve(finalPath);
+    const allowUpload = path.resolve(UPLOAD_DIR);
+    const allowTemp = path.resolve(TEMP_DIR);
+
+    if (!resolvedFinal.startsWith(allowUpload) && !resolvedFinal.startsWith(allowTemp)) {
+        throw new Error('Security Violation: Invalid merge target path');
+    }
+
+    const dest = createWriteStream(resolvedFinal);
     let errorOccurred = false;
 
     for (let i = 0; i < totalChunks; i++) {
         if (errorOccurred) break;
 
         // Construct part path using the safe prefix provided by caller
-        // Example prefix: "temp_dir/shareid_fileid_filename"
         const partPath = `${partPrefix}.part_${i}`;
+        const resolvedPart = path.resolve(partPath);
+
+        // Security: Ensure we are only reading from TEMP_DIR
+        if (!resolvedPart.startsWith(allowTemp)) {
+            dest.end();
+            throw new Error('Security Violation: Invalid part path');
+        }
 
         try {
-            await fs.access(partPath);
+            await fs.access(resolvedPart);
         } catch {
             dest.end();
             throw new Error(`Missing part ${i}. Upload incomplete.`);
         }
 
         await new Promise((resolve, reject) => {
-            const source = createReadStream(partPath);
+            const source = createReadStream(resolvedPart);
             source.on('error', (err: any) => {
                 errorOccurred = true;
                 reject(err);
@@ -640,20 +656,24 @@ const mergeChunks = async (partPrefix: string, totalChunks: number, finalPath: s
             source.on('end', resolve);
         });
 
-        await safeUnlink(partPath);
+        await safeUnlink(resolvedPart);
     }
 
     dest.end();
+
+    await new Promise((resolve, reject) => {
+        dest.on('finish', resolve);
+        dest.on('error', (err: any) => {
+            errorOccurred = true;
+            reject(err);
+        });
+    });
+
     if (errorOccurred) {
         // Cleanup destination if failed
         await safeUnlink(finalPath);
         throw new Error('Merge failed');
     }
-
-    await new Promise((resolve, reject) => {
-        dest.on('finish', resolve);
-        dest.on('error', reject);
-    });
 };
 
 // --- Global Cache Variables ---
@@ -822,7 +842,7 @@ const decryptData = (encryptedData: string): string => {
         salt = Buffer.from(salt, 'hex');
     } else if (parts.length === 3) {
         // Legacy format: iv:authTag:encrypted (uses hardcoded salt)
-        // nosemgrep: hardcoded-secret - This is required for backward compatibility with older files
+        // nosemgrep: hardcoded-secret
         [ivHex, authTagHex, encrypted] = parts;
         salt = 'salt';
     } else {
