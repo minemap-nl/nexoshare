@@ -52,7 +52,7 @@ const ExcelPreview: React.FC<ExcelPreviewProps> = ({ file }) => {
                 #excel-preview-table tr:nth-child(even) { bg-color: #f9f9f9; }
                 #excel-preview-table tr:hover { background-color: #f1f1f1; }
             `}</style>
-            <div dangerouslySetInnerHTML={{ __html: html || '' }} />
+            <div dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(html || '') }} />
         </div>
     );
 };

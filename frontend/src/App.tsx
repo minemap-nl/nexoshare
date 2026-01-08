@@ -721,7 +721,7 @@ const ProfileView = ({ user, config, forcedSetup = false, onComplete }: { user: 
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        const safeAppName = (config.appName || 'Nexo Share').replace(/[^a-zA-Z0-9-_ ]/g, '');
+        const safeAppName = (config.appName || 'Nexo Share').replace(/[^a-zA-Z0-9-_ ]/g, '').trim();
         a.download = `${safeAppName}-backup-codes.txt`;
         document.body.appendChild(a);
         a.click();
@@ -917,7 +917,7 @@ const ProfileView = ({ user, config, forcedSetup = false, onComplete }: { user: 
 
                                         {/* Witte achtergrond voor QR zorgt voor beter contrast */}
                                         <div className="bg-white p-2 rounded-lg mb-4 flex justify-center">
-                                            {twoFactorQR && !twoFactorQR.startsWith('javascript:') && !twoFactorQR.startsWith('vbscript:') && <img src={twoFactorQR} className="rounded max-h-48" alt="2FA QR Code" />}
+                                            {twoFactorQR && twoFactorQR.startsWith('data:image/') && <img src={twoFactorQR} className="rounded max-h-48" alt="2FA QR Code" />}
                                         </div>
 
                                         <div className="bg-black rounded-lg p-3 mb-4 border border-neutral-800">
@@ -1559,7 +1559,7 @@ const UploadView = () => {
                                 }
                             }}
                         >
-                            {qrCode && !qrCode.startsWith('javascript:') && !qrCode.startsWith('vbscript:') && <img src={qrCode} alt="QR Code" className="w-32 h-32" />}
+                            {qrCode && qrCode.startsWith('data:image/') && <img src={qrCode} alt="QR Code" className="w-32 h-32" />}
 
                             {/* Hover Overlay */}
                             <div className="absolute inset-0 bg-black/0 group-hover:bg-black/10 rounded-xl flex items-center justify-center transition-colors">
@@ -3770,9 +3770,13 @@ const Dashboard = ({ token, logout }: any) => {
             localStorage.removeItem('token');
             localStorage.removeItem('user');
             // Prevent Open Redirect: Only allow http/https protocols
-            if (config.ssoLogoutUrl.startsWith('http')) {
-                window.location.href = config.ssoLogoutUrl;
-            } else {
+            try {
+                if (config.ssoLogoutUrl && (new URL(config.ssoLogoutUrl).protocol === 'http:' || new URL(config.ssoLogoutUrl).protocol === 'https:')) {
+                    window.location.href = config.ssoLogoutUrl;
+                } else {
+                    window.location.reload();
+                }
+            } catch (e) {
                 window.location.reload();
             }
         } else {
@@ -3819,7 +3823,7 @@ const Dashboard = ({ token, logout }: any) => {
                     className={`flex gap-2 md:gap-3 items-center font-bold text-xl md:text-2xl tracking-tight text-white transition z-10 flex-1 justify-center sm:justify-start ${is2FALocked ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer hover:opacity-80'}`}
                     onClick={() => !is2FALocked && setView('upload')}
                 >
-                    {(config.logoUrl && !config.logoUrl.toLowerCase().trim().startsWith('javascript:') && !config.logoUrl.toLowerCase().trim().startsWith('vbscript:') && !config.logoUrl.toLowerCase().trim().startsWith('data:')) ? (
+                    {(config.logoUrl && (config.logoUrl.startsWith('http://') || config.logoUrl.startsWith('https://'))) ? (
                         <img src={config.logoUrl} className="h-8 md:h-10 rounded" alt="Logo" />
                     ) : (
                         <div className="bg-gradient-to-br from-purple-600 to-blue-600 p-2 rounded-lg shadow-lg shadow-purple-900/20">

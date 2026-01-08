@@ -1828,14 +1828,12 @@ apiRouter.get('/auth/check-2fa-requirement', authenticateToken, async (req, res)
 apiRouter.get('/utils/generate-id', authenticateToken, async (req, res) => {
     const queryLen = req.query.length;
     const rawLen = (typeof queryLen === 'string') ? queryLen : '12';
-    const length = parseInt(typeof rawLen === 'string' ? rawLen : '12') || 12;
+    const length = parseInt(rawLen, 10) || 12;
     // Cap length voor veiligheid
     const safeLength = Math.min(Math.max(length, 8), 64);
     const id = crypto.randomBytes(Math.ceil(safeLength / 2)).toString('hex').slice(0, safeLength);
     res.json({ id });
 });
-
-// QR Code Generator
 apiRouter.get('/utils/qr', authenticateToken, async (req, res) => {
     try {
         const url = req.query.url as string;
@@ -1890,7 +1888,12 @@ apiRouter.get('/auth/sso', async (req, res) => {
         res.cookie('sso_init', '1', { httpOnly: true, maxAge: 300000, sameSite: 'lax', secure: process.env.NODE_ENV === 'production' || config.secureCookies });
 
         // Validate Target URL to prevent Open Redirect
-        if (!targetUrl.startsWith('http')) {
+        try {
+            const parsed = new URL(targetUrl);
+            if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+                throw new Error('Invalid Protocol');
+            }
+        } catch (e) {
             return res.status(500).send('Invalid Redirect URL');
         }
 
@@ -1992,8 +1995,14 @@ apiRouter.get('/auth/callback', async (req, res) => {
         await pool.query('DELETE FROM sso_tokens WHERE expires_at < NOW()');
 
         // Open Redirect Protection
+        // Open Redirect Protection
         const loginUrl = `${cleanUrl(config.appUrl)}/login?nonce=${nonce}`;
-        if (!loginUrl.startsWith('http')) return res.status(500).send('Invalid App URL');
+        try {
+            const parsed = new URL(loginUrl);
+            if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error('Invalid Protocol');
+        } catch (e) {
+            return res.status(500).send('Invalid App URL');
+        }
 
         res.redirect(loginUrl);
 

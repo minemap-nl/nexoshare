@@ -41,7 +41,7 @@ const WordPreview: React.FC<WordPreviewProps> = ({ file }) => {
 
     return (
         <div className="h-full w-full bg-white rounded-xl overflow-auto p-8 custom-scrollbar">
-            <div className="prose max-w-none text-black" dangerouslySetInnerHTML={{ __html: html || '' }} />
+            <div className="prose max-w-none text-black" dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(html || '') }} />
         </div>
     );
 };
