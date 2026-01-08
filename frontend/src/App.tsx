@@ -55,6 +55,26 @@ const getUnitLabel = (val: number, unit: string) => {
     return val === 1 ? map[unit][0] : map[unit][1];
 };
 
+// --- SECURITY HELPERS ---
+const isValidHttpUrl = (url?: string): boolean => {
+    if (!url) return false;
+    try {
+        const u = new URL(url);
+        return u.protocol === 'http:' || u.protocol === 'https:';
+    } catch {
+        return false;
+    }
+};
+
+const isValidQrUrl = (url?: string): boolean => {
+    if (!url) return false;
+    return url.startsWith('data:image/');
+};
+
+const sanitizeAppName = (name: string): string => {
+    return name.replace(/[^a-zA-Z0-9-_ ]/g, '').trim();
+};
+
 // Pas de functie definitie aan:
 const getFutureDate = (val: number, unit: string, locale: string = 'en-GB') => {
     if (!val || val <= 0) return 'Never expires';
@@ -721,7 +741,7 @@ const ProfileView = ({ user, config, forcedSetup = false, onComplete }: { user: 
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        const safeAppName = (config.appName || 'Nexo Share').replace(/[^a-zA-Z0-9-_ ]/g, '').trim();
+        const safeAppName = sanitizeAppName(config.appName || 'Nexo Share');
         a.download = `${safeAppName}-backup-codes.txt`;
         document.body.appendChild(a);
         a.click();
@@ -917,7 +937,7 @@ const ProfileView = ({ user, config, forcedSetup = false, onComplete }: { user: 
 
                                         {/* Witte achtergrond voor QR zorgt voor beter contrast */}
                                         <div className="bg-white p-2 rounded-lg mb-4 flex justify-center">
-                                            {twoFactorQR && twoFactorQR.startsWith('data:image/') && <img src={twoFactorQR} className="rounded max-h-48" alt="2FA QR Code" />}
+                                            {isValidQrUrl(twoFactorQR!) && <img src={twoFactorQR!} className="rounded max-h-48" alt="2FA QR Code" />}
                                         </div>
 
                                         <div className="bg-black rounded-lg p-3 mb-4 border border-neutral-800">
@@ -1559,7 +1579,7 @@ const UploadView = () => {
                                 }
                             }}
                         >
-                            {qrCode && qrCode.startsWith('data:image/') && <img src={qrCode} alt="QR Code" className="w-32 h-32" />}
+                            {isValidQrUrl(qrCode!) && <img src={qrCode!} alt="QR Code" className="w-32 h-32" />}
 
                             {/* Hover Overlay */}
                             <div className="absolute inset-0 bg-black/0 group-hover:bg-black/10 rounded-xl flex items-center justify-center transition-colors">
@@ -3769,9 +3789,9 @@ const Dashboard = ({ token, logout }: any) => {
         if (config.ssoEnabled && config.ssoLogoutUrl && config.ssoLogoutUrl.trim() !== '') {
             localStorage.removeItem('token');
             localStorage.removeItem('user');
-            // Prevent Open Redirect: Only allow http/https protocols
+            // Prevent Open Redirect via Helper
             try {
-                if (config.ssoLogoutUrl && (new URL(config.ssoLogoutUrl).protocol === 'http:' || new URL(config.ssoLogoutUrl).protocol === 'https:')) {
+                if (isValidHttpUrl(config.ssoLogoutUrl)) {
                     window.location.href = config.ssoLogoutUrl;
                 } else {
                     window.location.reload();
@@ -3823,7 +3843,7 @@ const Dashboard = ({ token, logout }: any) => {
                     className={`flex gap-2 md:gap-3 items-center font-bold text-xl md:text-2xl tracking-tight text-white transition z-10 flex-1 justify-center sm:justify-start ${is2FALocked ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer hover:opacity-80'}`}
                     onClick={() => !is2FALocked && setView('upload')}
                 >
-                    {(config.logoUrl && (config.logoUrl.startsWith('http://') || config.logoUrl.startsWith('https://'))) ? (
+                    {(config.logoUrl && isValidHttpUrl(config.logoUrl)) ? (
                         <img src={config.logoUrl} className="h-8 md:h-10 rounded" alt="Logo" />
                     ) : (
                         <div className="bg-gradient-to-br from-purple-600 to-blue-600 p-2 rounded-lg shadow-lg shadow-purple-900/20">
