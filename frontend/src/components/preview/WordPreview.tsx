@@ -18,6 +18,12 @@ const WordPreview: React.FC<WordPreviewProps> = ({ file }) => {
                 let arrayBuffer;
                 if (typeof file === 'string') {
                     const res = await fetch(file, { credentials: 'include' });
+                    if (!res.ok) {
+                        if (res.status === 401 || res.status === 403) {
+                            throw new Error("Access Denied: You don't have permission to view this file.");
+                        }
+                        throw new Error(`Failed to load file: ${res.status} ${res.statusText}`);
+                    }
                     arrayBuffer = await res.arrayBuffer();
                 } else {
                     arrayBuffer = await file.arrayBuffer();

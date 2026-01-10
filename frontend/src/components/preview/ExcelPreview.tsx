@@ -18,6 +18,12 @@ const ExcelPreview: React.FC<ExcelPreviewProps> = ({ file }) => {
                 let data;
                 if (typeof file === 'string') {
                     const res = await fetch(file, { credentials: 'include' });
+                    if (!res.ok) {
+                        if (res.status === 401 || res.status === 403) {
+                            throw new Error("Access Denied: You don't have permission to view this file.");
+                        }
+                        throw new Error(`Failed to load file: ${res.status} ${res.statusText}`);
+                    }
                     data = await res.arrayBuffer();
                 } else {
                     data = await file.arrayBuffer();

@@ -1827,15 +1827,11 @@ apiRouter.get('/auth/check-2fa-requirement', authenticateToken, async (req, res)
 
 // --- Utility Route voor ID generatie (Idee: ID Feature) ---
 apiRouter.get('/utils/generate-id', authenticateToken, async (req, res) => {
-    const queryLen = req.query.length;
-    // Use Zod for strict input validation (Snyk Compliance)
-    const schema = z.object({
-        length: z.coerce.number().int().min(8).max(64).default(12)
-    });
+    // FIX: Expliciete type check om 'Improper Type Validation' te voorkomen
+    const lenQuery = req.query.length;
+    const length = (typeof lenQuery === 'string' && /^\d+$/.test(lenQuery)) ? parseInt(lenQuery) : 12;
 
-    const result = schema.safeParse(req.query);
-    const safeLength = result.success ? result.data.length : 12;
-
+    const safeLength = Math.min(Math.max(length, 8), 64);
     const id = crypto.randomBytes(Math.ceil(safeLength / 2)).toString('hex').slice(0, safeLength);
     res.json({ id });
 });
@@ -1873,10 +1869,15 @@ apiRouter.get('/auth/sso', async (req, res) => {
 
         let issuerOrigin = '';
         try {
-            issuerOrigin = new URL(config.oidcIssuer).origin;
+            const issuerUrl = new URL(config.oidcIssuer);
+            // Verify protocol to prevent javascript: or other harmful protocols
+            if (issuerUrl.protocol !== 'http:' && issuerUrl.protocol !== 'https:') {
+                throw new Error('Invalid protocol');
+            }
+            issuerOrigin = issuerUrl.origin;
         } catch (e) {
             console.error('[SSO DEBUG] Invalid Issuer URL:', config.oidcIssuer);
-            return res.status(500).send('Invalid SSO Configuration');
+            return res.status(500).send('Invalid SSO Configuration: Issuer URL must be a valid HTTP(S) URL');
         }
 
         const redirectUri = `${cleanUrl(config.appUrl)}/api/auth/callback`;
@@ -2718,14 +2719,14 @@ apiRouter.post('/shares/:id/finalize', authenticateToken, uploadLimiter, async (
             const safeExtension = path.extname(safeFileName);
             const finalPath = path.join(shareDir, crypto.randomBytes(8).toString('hex') + safeExtension);
 
-            await mergeChunks(`${id}_${f.id}_${safeFileName}`, f.chunks, finalPath);
-
             const k = 1024;
             const sizeMap: any = { 'KB': k, 'MB': k * k, 'GB': k * k * k, 'TB': k * k * k * k };
             const chunkSizeVal = config.chunkSizeVal || 50;
             const chunkSizeUnit = config.chunkSizeUnit || 'MB';
             const CHUNK_SIZE = chunkSizeVal * (sizeMap[chunkSizeUnit] || sizeMap['MB']);
             const totalChunks = Math.ceil(f.size / CHUNK_SIZE);
+
+            await mergeChunks(path.join(TEMP_DIR, `${id}_${f.fileId}_${safeFileName}`), totalChunks, finalPath);
 
 
 

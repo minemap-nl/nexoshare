@@ -4,6 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
+    "test": "bun test",
     "dev": "bun --watch src/index.ts",
     "build": "tsc",
     "start": "bun src/index.ts"

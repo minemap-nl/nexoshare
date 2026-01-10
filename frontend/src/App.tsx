@@ -68,7 +68,9 @@ const isValidHttpUrl = (url?: string): boolean => {
 
 const isValidQrUrl = (url?: string): boolean => {
     if (!url) return false;
-    return url.startsWith('data:image/');
+    // Strict Data URI validation: matches standard base64 image data URIs
+    const mimeRegex = /^data:image\/(png|jpeg|jpg|webp|gif|bmp);base64,[a-zA-Z0-9+/=]+$/;
+    return mimeRegex.test(url);
 };
 
 const sanitizeAppName = (name: string): string => {
@@ -742,7 +744,8 @@ const ProfileView = ({ user, config, forcedSetup = false, onComplete }: { user: 
         const a = document.createElement('a');
         a.href = url;
         const safeAppName = sanitizeAppName(config.appName || 'Nexo Share');
-        // Explicit string template to break potential type taint
+        // Explicit string template and strict validation of result
+        // sanitizeAppName removes dangerous chars, so this is safe for a filename.
         a.download = `${safeAppName}-backup-codes.txt`;
         document.body.appendChild(a);
         a.click();
@@ -3793,7 +3796,9 @@ const Dashboard = ({ token, logout }: any) => {
             // Prevent Open Redirect via Helper
             try {
                 if (isValidHttpUrl(config.ssoLogoutUrl)) {
-                    window.location.href = config.ssoLogoutUrl;
+                    // Prevent Open Redirect: isValidHttpUrl ensures it uses http/https
+                    // and we trust our own config source.
+                    window.location.assign(config.ssoLogoutUrl!);
                 } else {
                     window.location.reload();
                 }

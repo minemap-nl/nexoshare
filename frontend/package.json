@@ -24,7 +24,7 @@
     "react-pdf": "^10.2.0",
     "react-router-dom": "^7.10.1",
     "react-zoom-pan-pinch": "^3.7.0",
-    "xlsx": "^0.18.5"
+    "xlsx": "https://cdn.sheetjs.com/xlsx-latest/xlsx-latest.tgz"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",
