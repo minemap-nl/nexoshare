@@ -733,11 +733,12 @@ const ProfileView = ({ user, config, forcedSetup = false, onComplete }: { user: 
         const blob = new Blob([text], { type: 'text/plain' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
+        let safeAppName = (config.appName || 'Nexo Share').replace(/[^a-zA-Z0-9_\- ]/g, '').trim();
+        if (!safeAppName) safeAppName = "Nexo-Share"; // Fallback if sanitization kills everything
+
         a.href = url;
-        const safeAppName = (config.appName || 'Nexo Share').replace(/[^a-zA-Z0-9_\- ]/g, '').trim();
-        // Explicit string template and strict validation of result
-        // sanitizeAppName removes dangerous chars, so this is safe for a filename.
-        a.download = `${safeAppName}-backup-codes.txt`;
+        // Use setAttribute to be explicit
+        a.setAttribute('download', `${safeAppName}-backup-codes.txt`);
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
@@ -3792,10 +3793,10 @@ const Dashboard = ({ token, logout }: any) => {
             localStorage.removeItem('user');
             // Prevent Open Redirect via Helper
             try {
-                if (isValidHttpUrl(config.ssoLogoutUrl)) {
-                    // Prevent Open Redirect: isValidHttpUrl ensures it uses http/https
-                    // and we trust our own config source.
-                    window.location.assign(config.ssoLogoutUrl!);
+                const logoutUrl = config.ssoLogoutUrl;
+                // Strict HTTP/HTTPS validation (Regex) before assign
+                if (logoutUrl && /^https?:\/\//i.test(logoutUrl)) {
+                    window.location.assign(logoutUrl);
                 } else {
                     window.location.reload();
                 }

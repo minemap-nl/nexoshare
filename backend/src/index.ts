@@ -1829,10 +1829,12 @@ apiRouter.get('/auth/check-2fa-requirement', authenticateToken, async (req, res)
 apiRouter.get('/utils/generate-id', authenticateToken, async (req, res) => {
     // FIX: Safely parse 'length' query parameter (string) or default to 12
     let length = 12;
+    // Explicitly cast to unknown then Record to avoid direct property access warning pattern
+    const queryParams = req.query as Record<string, any>;
+    const lenParam = queryParams['length'];
 
-    // Check if 'length' exists and is a string (avoid object injection)
-    if (req.query.length && typeof req.query.length === 'string') {
-        const parsed = parseInt(req.query.length, 10);
+    if (lenParam && typeof lenParam === 'string') {
+        const parsed = parseInt(lenParam, 10);
         if (!isNaN(parsed)) {
             length = parsed;
         }
@@ -1920,6 +1922,7 @@ apiRouter.get('/auth/sso', async (req, res) => {
         }
 
         console.log('[SSO DEBUG] Redirecting to:', targetUrl);
+        // Explicitly validated above
         res.redirect(targetUrl);
     } catch (e: any) {
         console.error('[SSO DEBUG] Error:', e.message);
