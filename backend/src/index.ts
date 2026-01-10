@@ -1917,9 +1917,10 @@ apiRouter.get('/auth/sso', async (req, res) => {
             }
         };
 
-        if (!validator.isURL(targetUrl, { require_protocol: true, protocols: ['http', 'https'] })) {
-            console.error('[SSO] Invalid Redirect Target:', targetUrl);
-            return res.status(500).send('Invalid Redirect URL');
+        // Open Redirect Protection: MUST start with the configured trusted issuer
+        if (!targetUrl.startsWith(issuerOrigin)) {
+            console.error('[SSO] Redirect Target does not match trusted Issuer:', targetUrl);
+            return res.status(500).send('Invalid Redirect URL: Target origin mismatch');
         }
 
         console.log('[SSO DEBUG] Redirecting to:', targetUrl);
@@ -2023,9 +2024,11 @@ apiRouter.get('/auth/callback', async (req, res) => {
         // Open Redirect Protection (Strict Whitelist)
         const loginUrl = `${cleanUrl(config.appUrl)}/login?nonce=${nonce}`;
 
-        if (!validator.isURL(loginUrl, { require_protocol: true, protocols: ['http', 'https'] })) {
-            console.error('[SSO] Invalid Login URL Redirect:', loginUrl);
-            return res.status(500).send('Invalid App URL');
+        // Open Redirect Protection: MUST start with the configured trusted App URL
+        const trustedAppOrigin = cleanUrl(config.appUrl);
+        if (!loginUrl.startsWith(trustedAppOrigin)) {
+            console.error('[SSO] Login URL does not match trusted App URL:', loginUrl);
+            return res.status(500).send('Invalid App URL: Origin mismatch');
         }
 
         res.redirect(loginUrl);
