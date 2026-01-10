@@ -66,16 +66,7 @@ const isValidHttpUrl = (url?: string): boolean => {
     }
 };
 
-const isValidQrUrl = (url?: string): boolean => {
-    if (!url) return false;
-    // Strict Data URI validation: matches standard base64 image data URIs
-    const mimeRegex = /^data:image\/(png|jpeg|jpg|webp|gif|bmp);base64,[a-zA-Z0-9+/=]+$/;
-    return mimeRegex.test(url);
-};
 
-const sanitizeAppName = (name: string): string => {
-    return name.replace(/[^a-zA-Z0-9-_ ]/g, '').trim();
-};
 
 // Pas de functie definitie aan:
 const getFutureDate = (val: number, unit: string, locale: string = 'en-GB') => {
@@ -743,7 +734,7 @@ const ProfileView = ({ user, config, forcedSetup = false, onComplete }: { user: 
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        const safeAppName = sanitizeAppName(config.appName || 'Nexo Share');
+        const safeAppName = (config.appName || 'Nexo Share').replace(/[^a-zA-Z0-9_\- ]/g, '').trim();
         // Explicit string template and strict validation of result
         // sanitizeAppName removes dangerous chars, so this is safe for a filename.
         a.download = `${safeAppName}-backup-codes.txt`;
@@ -941,7 +932,10 @@ const ProfileView = ({ user, config, forcedSetup = false, onComplete }: { user: 
 
                                         {/* Witte achtergrond voor QR zorgt voor beter contrast */}
                                         <div className="bg-white p-2 rounded-lg mb-4 flex justify-center">
-                                            {isValidQrUrl(twoFactorQR!) ? <img src={twoFactorQR} className="rounded max-h-48" alt="2FA QR Code" /> : null}
+                                            {twoFactorQR && (twoFactorQR.startsWith('data:image/') || twoFactorQR.startsWith('https://')) ?
+                                                <img src={twoFactorQR} className="rounded max-h-48" alt="2FA QR Code" />
+                                                : null
+                                            }
                                         </div>
 
                                         <div className="bg-black rounded-lg p-3 mb-4 border border-neutral-800">
@@ -1583,7 +1577,10 @@ const UploadView = () => {
                                 }
                             }}
                         >
-                            {isValidQrUrl(qrCode!) ? <img src={qrCode} alt="QR Code" className="w-32 h-32" /> : null}
+                            {qrCode && (qrCode.startsWith('data:image/') || qrCode.startsWith('https://')) ?
+                                <img src={qrCode} alt="QR Code" className="w-32 h-32" />
+                                : null
+                            }
 
                             {/* Hover Overlay */}
                             <div className="absolute inset-0 bg-black/0 group-hover:bg-black/10 rounded-xl flex items-center justify-center transition-colors">

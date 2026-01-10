@@ -1827,9 +1827,16 @@ apiRouter.get('/auth/check-2fa-requirement', authenticateToken, async (req, res)
 
 // --- Utility Route voor ID generatie (Idee: ID Feature) ---
 apiRouter.get('/utils/generate-id', authenticateToken, async (req, res) => {
-    // FIX: Expliciete type check om 'Improper Type Validation' te voorkomen
-    const lenQuery = req.query.length;
-    const length = (typeof lenQuery === 'string' && /^\d+$/.test(lenQuery)) ? parseInt(lenQuery) : 12;
+    // FIX: Safely parse 'length' query parameter (string) or default to 12
+    let length = 12;
+
+    // Check if 'length' exists and is a string (avoid object injection)
+    if (req.query.length && typeof req.query.length === 'string') {
+        const parsed = parseInt(req.query.length, 10);
+        if (!isNaN(parsed)) {
+            length = parsed;
+        }
+    }
 
     const safeLength = Math.min(Math.max(length, 8), 64);
     const id = crypto.randomBytes(Math.ceil(safeLength / 2)).toString('hex').slice(0, safeLength);
@@ -1897,11 +1904,18 @@ apiRouter.get('/auth/sso', async (req, res) => {
         // Validate Target URL to prevent Open Redirect
         // Strictly allow only http/https protocols using validator
         // Validate Target URL to prevent Open Redirect (Zod Strict)
-        const urlSchema = z.string().url().refine((val) => val.startsWith('http://') || val.startsWith('https://'), {
-            message: "Must be HTTP or HTTPS"
-        });
+        // Validate Target URL to prevent Open Redirect (Strict Whitelist)
+        const isSafeUrl = (url: string) => {
+            try {
+                const parsed = new URL(url);
+                return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+            } catch {
+                return false;
+            }
+        };
 
-        if (!urlSchema.safeParse(targetUrl).success) {
+        if (!isSafeUrl(targetUrl)) {
+            console.error('[SSO] Invalid Redirect Target:', targetUrl);
             return res.status(500).send('Invalid Redirect URL');
         }
 
@@ -2003,12 +2017,20 @@ apiRouter.get('/auth/callback', async (req, res) => {
         await pool.query('DELETE FROM sso_tokens WHERE expires_at < NOW()');
 
         // Open Redirect Protection (Zod Strict)
+        // Open Redirect Protection (Strict Whitelist)
         const loginUrl = `${cleanUrl(config.appUrl)}/login?nonce=${nonce}`;
-        const urlSchema = z.string().url().refine((val) => val.startsWith('http://') || val.startsWith('https://'), {
-            message: "Must be HTTP or HTTPS"
-        });
 
-        if (!urlSchema.safeParse(loginUrl).success) {
+        const isSafeUrl = (url: string) => {
+            try {
+                const parsed = new URL(url);
+                return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+            } catch {
+                return false;
+            }
+        };
+
+        if (!isSafeUrl(loginUrl)) {
+            console.error('[SSO] Invalid Login URL Redirect:', loginUrl);
             return res.status(500).send('Invalid App URL');
         }
 
