@@ -2194,20 +2194,24 @@ apiRouter.put('/config', async (req, res) => {
     try {
         const currentConfig = await getConfig();
 
-        // Prevent overwriting secrets with placeholders or empty strings if the intent was not to clear them
-        // If the new value is the placeholder '********', use the existing value
-        // If the new value is empty, only overwrite if we explicitly want to allow clearing secrets (which is rare for these fields via this endpoint)
-        // Note: For now, we assume empty string might be an accident if currentConfig exists.
+        // MERGE: Start with current config to prevent data loss of missing fields
+        const finalConfig = { ...currentConfig, ...newConfig };
 
+        // Secrets Handling: Restore if empty/masked
         if (!newConfig.smtpPass || newConfig.smtpPass === '********') {
-            newConfig.smtpPass = currentConfig.smtpPass;
-        }
-        if (!newConfig.oidcSecret || newConfig.oidcSecret === '********') {
-            newConfig.oidcSecret = currentConfig.oidcSecret;
+            finalConfig.smtpPass = currentConfig.smtpPass;
+        } else {
+            finalConfig.smtpPass = newConfig.smtpPass;
         }
 
-        // Behoud setup_completed status tenzij expliciet meegegeven (voorkomt per ongeluk resetten)
-        newConfig.setup_completed = currentConfig.setupCompleted;
+        if (!newConfig.oidcSecret || newConfig.oidcSecret === '********') {
+            finalConfig.oidcSecret = currentConfig.oidcSecret;
+        } else {
+            finalConfig.oidcSecret = newConfig.oidcSecret;
+        }
+
+        // Ensure critical booleans are preserved/updated correctly
+        finalConfig.setup_completed = currentConfig.setupCompleted; // Never allow overwrite via API
 
         await pool.query(
             `INSERT INTO config (id, data, setup_completed) VALUES (1, $1, $2) 
