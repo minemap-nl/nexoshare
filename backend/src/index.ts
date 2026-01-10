@@ -1917,16 +1917,13 @@ apiRouter.get('/auth/sso', async (req, res) => {
             }
         };
 
-        if (!isSafeUrl(targetUrl)) {
+        if (!validator.isURL(targetUrl, { require_protocol: true, protocols: ['http', 'https'] })) {
             console.error('[SSO] Invalid Redirect Target:', targetUrl);
             return res.status(500).send('Invalid Redirect URL');
         }
 
-        // Reconstruct URL to break taint tracking (Snyk)
-        const safeTarget = new URL(targetUrl).toString();
-
-        console.log('[SSO DEBUG] Redirecting to:', safeTarget);
-        res.redirect(safeTarget);
+        console.log('[SSO DEBUG] Redirecting to:', targetUrl);
+        res.redirect(targetUrl);
     } catch (e: any) {
         console.error('[SSO DEBUG] Error:', e.message);
         console.error('[SSO DEBUG] Error:', e.message);
@@ -2026,24 +2023,12 @@ apiRouter.get('/auth/callback', async (req, res) => {
         // Open Redirect Protection (Strict Whitelist)
         const loginUrl = `${cleanUrl(config.appUrl)}/login?nonce=${nonce}`;
 
-        const isSafeUrl = (url: string) => {
-            try {
-                const parsed = new URL(url);
-                return parsed.protocol === 'http:' || parsed.protocol === 'https:';
-            } catch {
-                return false;
-            }
-        };
-
-        if (!isSafeUrl(loginUrl)) {
+        if (!validator.isURL(loginUrl, { require_protocol: true, protocols: ['http', 'https'] })) {
             console.error('[SSO] Invalid Login URL Redirect:', loginUrl);
             return res.status(500).send('Invalid App URL');
         }
 
-        // Reconstruct URL to prevent Open Redirect (Break Taint)
-        const safeLoginUrl = new URL(loginUrl).toString();
-
-        res.redirect(safeLoginUrl);
+        res.redirect(loginUrl);
 
     } catch (e: any) {
         // BETERE ERROR LOGGING

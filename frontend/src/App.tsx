@@ -740,6 +740,7 @@ const ProfileView = ({ user, config, forcedSetup = false, onComplete }: { user: 
         a.style.display = 'none';
         a.href = url;
 
+        // Use strict regex to allow dynamic name but prevent XSS
         let safeAppName = (config.appName || 'Nexo Share').replace(/[^a-zA-Z0-9_\-]/g, '').trim();
         if (!safeAppName) safeAppName = "Nexo-Share";
 
