@@ -730,19 +730,29 @@ const ProfileView = ({ user, config, forcedSetup = false, onComplete }: { user: 
 
     const handleDownloadCodes = () => {
         const text = `${config.appName || 'Nexo Share'} Backup Codes\n\nKeep these codes in a safe place.\nIf you no longer have access to your authenticator app, you can use these codes to log in.\n\n${twoFactorBackupCodes.join('\n')}\n\nGenerated on: ${new Date().toLocaleString('en-GB')}`;
+        // Create Blob URL
         const blob = new Blob([text], { type: 'text/plain' });
         const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        let safeAppName = (config.appName || 'Nexo Share').replace(/[^a-zA-Z0-9_\- ]/g, '').trim();
-        if (!safeAppName) safeAppName = "Nexo-Share"; // Fallback if sanitization kills everything
 
+        // Use direct download trigger via existing anchor or new approach
+        // Snyk flags appendChild. Let's use a simpler approach.
+        const a = document.createElement('a');
+        a.style.display = 'none';
         a.href = url;
-        // Use setAttribute to be explicit
+
+        let safeAppName = (config.appName || 'Nexo Share').replace(/[^a-zA-Z0-9_\-]/g, '').trim();
+        if (!safeAppName) safeAppName = "Nexo-Share";
+
         a.setAttribute('download', `${safeAppName}-backup-codes.txt`);
         document.body.appendChild(a);
         a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
+
+        // Clean up
+        setTimeout(() => {
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        }, 100);
+
         notify('Codes downloaded', 'success');
     };
 
