@@ -710,6 +710,7 @@ async function getConfig() {
             require2FA: false,
             allowPasskeys: true,
             allowPasswordReset: true,
+            maxScanSizeVal: 25, maxScanSizeUnit: 'MB',  // ClamAV default StreamMaxLength
             appLocale: process.env.APP_LOCALE || 'en-GB',
             serverTimezone: process.env.TZ || 'UTC'
         };
@@ -1099,8 +1100,31 @@ const scanFiles = async (files: Express.Multer.File[]) => {
         }
     }
 
-    // 3. Scanner is actief, voer scan uit
+    // 3. Bereken max scan grootte in bytes
+    const sizeMultipliers: any = { 'KB': 1024, 'MB': 1024 * 1024, 'GB': 1024 * 1024 * 1024, 'TB': 1024 * 1024 * 1024 * 1024 };
+    const maxScanBytes = (config.maxScanSizeVal || 25) * (sizeMultipliers[config.maxScanSizeUnit] || sizeMultipliers['MB']);
+
+    // 4. Scanner is actief, voer scan uit
     for (const file of files) {
+        // Check bestandsgrootte tegen max scan limiet
+        if (file.size > maxScanBytes) {
+            const fileSizeMB = (file.size / (1024 * 1024)).toFixed(1);
+            const limitMB = (maxScanBytes / (1024 * 1024)).toFixed(0);
+
+            if (config.clamavMustScan) {
+                // FAIL-CLOSED: Bestand te groot en scannen is verplicht
+                await safeUnlink(file.path);
+                throw new Error(
+                    `File "${file.originalname}" (${fileSizeMB} MB) exceeds the virus scan limit (${limitMB} MB). ` +
+                    `To scan larger files, increase 'Max Virus Scan File Size' in settings AND update ClamAV's StreamMaxLength in clamd.conf.`
+                );
+            } else {
+                // FAIL-OPEN: Log warning en sla scan over
+                console.warn(`⚠️ Skipping virus scan for "${file.originalname}" (${fileSizeMB} MB): exceeds limit of ${limitMB} MB.`);
+                continue;
+            }
+        }
+
         try {
             const result = await clamscanInstance.isInfected(file.path);
             if (result.isInfected) {
@@ -1110,6 +1134,16 @@ const scanFiles = async (files: Express.Multer.File[]) => {
         } catch (e: any) {
             // Als er een error is tijdens het scannen zelf (en het is geen virus melding)
             if (e.message.includes('Virus')) throw e;
+            if (e.message.includes('exceeds')) throw e;  // Gooi size limit errors door
+
+            // Check specifiek voor ClamAV stream limit error
+            if (e.message.includes('INSTREAM size limit exceeded') || e.message.includes('StreamMaxLength')) {
+                const suggestedMB = Math.ceil(file.size / (1024 * 1024)) + 10;
+                throw new Error(
+                    `ClamAV rejected file "${file.originalname}": stream limit exceeded. ` +
+                    `Increase StreamMaxLength in clamd.conf to at least ${suggestedMB}M and restart ClamAV.`
+                );
+            }
 
             // Ook hier: als scannen verplicht is, mag een error niet genegeerd worden
             if (config.clamavMustScan) {
@@ -2754,11 +2788,39 @@ apiRouter.post('/shares/:id/finalize', authenticateToken, uploadLimiter, async (
 
 
             // VIRUSSCAN
-            if (clamscanInstance) {
-                const result = await clamscanInstance.isInfected(finalPath);
-                if (result.isInfected) {
+            const sizeMultipliers: any = { 'KB': 1024, 'MB': 1024 * 1024, 'GB': 1024 * 1024 * 1024, 'TB': 1024 * 1024 * 1024 * 1024 };
+            const maxScanBytes = (config.maxScanSizeVal || 25) * (sizeMultipliers[config.maxScanSizeUnit] || sizeMultipliers['MB']);
+
+            if (f.size > maxScanBytes) {
+                const fileSizeMB = (f.size / (1024 * 1024)).toFixed(1);
+                const limitMB = (maxScanBytes / (1024 * 1024)).toFixed(0);
+                if (config.clamavMustScan) {
                     await safeUnlink(finalPath);
-                    throw new Error(`Virus detected in ${f.originalName}!`);
+                    throw new Error(
+                        `File "${f.originalName}" (${fileSizeMB} MB) exceeds virus scan limit (${limitMB} MB). ` +
+                        `Increase 'Max Virus Scan File Size' in settings AND ClamAV's StreamMaxLength in clamd.conf.`
+                    );
+                } else {
+                    console.warn(`⚠️ Skipping virus scan for "${f.originalName}" (${fileSizeMB} MB): exceeds limit of ${limitMB} MB.`);
+                }
+            } else if (clamscanInstance) {
+                try {
+                    const result = await clamscanInstance.isInfected(finalPath);
+                    if (result.isInfected) {
+                        await safeUnlink(finalPath);
+                        throw new Error(`Virus detected in ${f.originalName}!`);
+                    }
+                } catch (scanErr: any) {
+                    if (scanErr.message.includes('Virus')) throw scanErr;
+                    if (scanErr.message.includes('INSTREAM size limit exceeded')) {
+                        const suggestedMB = Math.ceil(f.size / (1024 * 1024)) + 10;
+                        throw new Error(
+                            `ClamAV rejected "${f.originalName}": stream limit exceeded. ` +
+                            `Increase StreamMaxLength in clamd.conf to at least ${suggestedMB}M.`
+                        );
+                    }
+                    if (config.clamavMustScan) throw new Error("Virus scan error. Try again later.");
+                    console.warn(`Scan error (Open): ${scanErr.message}`);
                 }
             } else if (config.clamavMustScan) {
                 await safeUnlink(finalPath);
@@ -3039,12 +3101,43 @@ apiRouter.post('/shares/:id/stage', authenticateToken, uploadLimiter, async (req
             await mergeChunks(partPrefix, totalChunks, finalPath);
 
             // SCAN
-            if (clamscanInstance) {
-                const result = await clamscanInstance.isInfected(finalPath);
-                if (result.isInfected) {
+            const sizeMultipliers: any = { 'KB': 1024, 'MB': 1024 * 1024, 'GB': 1024 * 1024 * 1024, 'TB': 1024 * 1024 * 1024 * 1024 };
+            const maxScanBytes = (config.maxScanSizeVal || 25) * (sizeMultipliers[config.maxScanSizeUnit] || sizeMultipliers['MB']);
+
+            if (f.size > maxScanBytes) {
+                const fileSizeMB = (f.size / (1024 * 1024)).toFixed(1);
+                const limitMB = (maxScanBytes / (1024 * 1024)).toFixed(0);
+                if (config.clamavMustScan) {
                     await safeUnlink(finalPath);
-                    throw new Error(`Virus detected in ${f.fileName}!`);
+                    throw new Error(
+                        `File "${f.fileName}" (${fileSizeMB} MB) exceeds virus scan limit (${limitMB} MB). ` +
+                        `Increase 'Max Virus Scan File Size' in settings AND ClamAV's StreamMaxLength.`
+                    );
+                } else {
+                    console.warn(`⚠️ Skipping virus scan for "${f.fileName}" (${fileSizeMB} MB): exceeds limit of ${limitMB} MB.`);
                 }
+            } else if (clamscanInstance) {
+                try {
+                    const result = await clamscanInstance.isInfected(finalPath);
+                    if (result.isInfected) {
+                        await safeUnlink(finalPath);
+                        throw new Error(`Virus detected in ${f.fileName}!`);
+                    }
+                } catch (scanErr: any) {
+                    if (scanErr.message.includes('Virus')) throw scanErr;
+                    if (scanErr.message.includes('INSTREAM size limit exceeded')) {
+                        const suggestedMB = Math.ceil(f.size / (1024 * 1024)) + 10;
+                        throw new Error(
+                            `ClamAV rejected "${f.fileName}": stream limit exceeded. ` +
+                            `Increase StreamMaxLength in clamd.conf to at least ${suggestedMB}M.`
+                        );
+                    }
+                    if (config.clamavMustScan) throw new Error("Virus scan error. Try again later.");
+                    console.warn(`Scan error (Open): ${scanErr.message}`);
+                }
+            } else if (config.clamavMustScan) {
+                await safeUnlink(finalPath);
+                throw new Error("Virus scanner unavailable, upload refused.");
             }
 
             stagedFiles.push({
@@ -3848,11 +3941,38 @@ apiRouter.post('/public/reverse/:id/finalize', uploadLimiter, async (req, res) =
             await mergeChunks(partPrefix, totalChunks, finalPath);
 
             // Virusscan & Extensie check
-            if (clamscanInstance) {
-                const result = await clamscanInstance.isInfected(finalPath);
-                if (result.isInfected) {
+            const sizeMultipliers: any = { 'KB': 1024, 'MB': 1024 * 1024, 'GB': 1024 * 1024 * 1024, 'TB': 1024 * 1024 * 1024 * 1024 };
+            const maxScanBytes = (config.maxScanSizeVal || 25) * (sizeMultipliers[config.maxScanSizeUnit] || sizeMultipliers['MB']);
+
+            if (f.size > maxScanBytes) {
+                const fileSizeMB = (f.size / (1024 * 1024)).toFixed(1);
+                const limitMB = (maxScanBytes / (1024 * 1024)).toFixed(0);
+                if (config.clamavMustScan) {
                     await safeUnlink(finalPath);
-                    throw new Error(`Virus in ${f.originalName}!`);
+                    throw new Error(
+                        `File "${f.originalName}" (${fileSizeMB} MB) exceeds virus scan limit (${limitMB} MB). ` +
+                        `Contact the administrator to increase the virus scan limit.`
+                    );
+                } else {
+                    console.warn(`⚠️ Skipping virus scan for "${f.originalName}" (${fileSizeMB} MB): exceeds limit of ${limitMB} MB.`);
+                }
+            } else if (clamscanInstance) {
+                try {
+                    const result = await clamscanInstance.isInfected(finalPath);
+                    if (result.isInfected) {
+                        await safeUnlink(finalPath);
+                        throw new Error(`Virus in ${f.originalName}!`);
+                    }
+                } catch (scanErr: any) {
+                    if (scanErr.message.includes('Virus')) throw scanErr;
+                    if (scanErr.message.includes('INSTREAM size limit exceeded')) {
+                        const suggestedMB = Math.ceil(f.size / (1024 * 1024)) + 10;
+                        throw new Error(
+                            `Virus scanner rejected file due to size limit. Please contact the administrator.`
+                        );
+                    }
+                    if (config.clamavMustScan) throw new Error("Virus scan error. Try again later.");
+                    console.warn(`Scan error (Open): ${scanErr.message}`);
                 }
             } else if (config.clamavMustScan) {
                 await safeUnlink(finalPath);

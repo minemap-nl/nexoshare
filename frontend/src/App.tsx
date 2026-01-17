@@ -3225,6 +3225,72 @@ const ConfigTabs = ({ user, onRestartSetup }: { user: any, onRestartSetup: () =>
                                     </p>
                                 </div>
                             </div>
+
+                            {/* Max Virus Scan File Size */}
+                            <div className="border-t border-red-500/20 pt-4 mt-4">
+                                <label className="block text-white font-bold mb-2">Max Virus Scan File Size</label>
+                                <p className="text-neutral-400 text-sm mb-3">
+                                    Files larger than this limit will skip virus scanning (or be rejected if "Enforce Virus Scan" is enabled).
+                                </p>
+                                <div className="flex gap-2 items-center">
+                                    <input
+                                        type="number"
+                                        min="1"
+                                        className="w-24 bg-black border border-neutral-700 rounded-lg p-2 text-white focus:border-purple-500 outline-none transition text-center"
+                                        value={config.maxScanSizeVal || 25}
+                                        onChange={e => setConfig({ ...config, maxScanSizeVal: parseInt(e.target.value) || 25 })}
+                                    />
+                                    <select
+                                        className="bg-black border border-neutral-700 rounded-lg p-2 text-white focus:border-purple-500 outline-none transition"
+                                        value={config.maxScanSizeUnit || 'MB'}
+                                        onChange={e => setConfig({ ...config, maxScanSizeUnit: e.target.value })}
+                                    >
+                                        <option value="KB">KB</option>
+                                        <option value="MB">MB</option>
+                                        <option value="GB">GB</option>
+                                        <option value="TB">TB</option>
+                                    </select>
+                                    <span className="text-neutral-500 text-sm ml-2">(ClamAV default: 25 MB)</span>
+                                </div>
+
+                                {/* Warning when value exceeds default */}
+                                {(() => {
+                                    const val = config.maxScanSizeVal || 25;
+                                    const unit = config.maxScanSizeUnit || 'MB';
+                                    const multipliers: any = { 'KB': 1 / 1024, 'MB': 1, 'GB': 1024, 'TB': 1024 * 1024 };
+                                    const inMB = val * (multipliers[unit] || 1);
+                                    if (inMB > 25) {
+                                        return (
+                                            <div className="mt-4 p-3 bg-yellow-500/10 border border-yellow-500/30 rounded-lg">
+                                                <p className="text-yellow-400 text-sm font-bold flex items-center gap-2">
+                                                    <AlertTriangle className="w-4 h-4" /> ClamAV Configuration Required
+                                                </p>
+                                                <p className="text-yellow-200/80 text-xs mt-2">
+                                                    You've set a limit higher than ClamAV's default (25 MB). Update your ClamAV config:
+                                                </p>
+
+                                                <p className="text-neutral-400 text-xs mt-3 font-bold">Option 1: clamd.conf</p>
+                                                <pre className="mt-1 bg-black p-2 rounded text-xs text-green-400 font-mono overflow-x-auto">
+                                                    {`StreamMaxLength ${Math.ceil(inMB)}M
+MaxScanSize ${Math.ceil(inMB)}M
+MaxFileSize ${Math.ceil(inMB)}M`}
+                                                </pre>
+
+                                                <p className="text-neutral-400 text-xs mt-3 font-bold">Option 2: Docker Compose (environmental variables for the ClamAV container)</p>
+                                                <pre className="mt-1 bg-black p-2 rounded text-xs text-blue-400 font-mono overflow-x-auto">
+                                                    {`environment:
+  - CLAMD_CONF_StreamMaxLength=${Math.ceil(inMB)}M
+  - CLAMD_CONF_MaxScanSize=${Math.ceil(inMB)}M
+  - CLAMD_CONF_MaxFileSize=${Math.ceil(inMB)}M`}
+                                                </pre>
+
+                                                <p className="text-neutral-500 text-xs mt-2">Then restart ClamAV for changes to take effect.</p>
+                                            </div>
+                                        );
+                                    }
+                                    return null;
+                                })()}
+                            </div>
                         </div>
 
                         <div className="border-t border-neutral-800 pt-6">
