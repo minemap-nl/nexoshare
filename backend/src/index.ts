@@ -109,9 +109,10 @@ const pool = new Pool({
     password: process.env.DB_PASSWORD,
     max: 20,
     idleTimeoutMillis: 30000,
-    connectionTimeoutMillis: 2000,
-    query_timeout: 10000, // 10 Seconds max per query
-    statement_timeout: 10000,
+    connectionTimeoutMillis: 5000,
+    // Verhoogd voor grote upload operaties (chunk merge kan lang duren bij 6GB+ bestanden)
+    query_timeout: 300000,     // 5 minuten
+    statement_timeout: 300000, // 5 minuten
     ssl: process.env.DB_SSL === 'true' ? {
         rejectUnauthorized: false
     } : false
@@ -2399,7 +2400,7 @@ apiRouter.put('/users/profile', authenticateToken, async (req, res) => {
     let values = [name, email];
     let i = 3;
 
-    if (password && password.trim() !== "") {
+    if (password && typeof password === 'string' && password.trim() !== "") {
         // Require Current Password
         const { currentPassword } = authReq.body;
         if (!currentPassword) return res.status(400).json({ error: 'Current password is required to change.' });
@@ -2503,7 +2504,7 @@ apiRouter.put('/users/:id', authenticateToken, requireAdmin, async (req, res) =>
     let values = [name, email, is_admin];
     let i = 4;
 
-    if (password && password.trim() !== "") {
+    if (password && typeof password === 'string' && password.trim() !== "") {
         const passwordCheck = isStrongPassword(password);
         if (!passwordCheck.valid) {
             return res.status(400).json({ error: passwordCheck.error });
