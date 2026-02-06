@@ -2251,7 +2251,7 @@ apiRouter.put('/config', async (req, res) => {
         await pool.query(
             `INSERT INTO config (id, data, setup_completed) VALUES (1, $1, $2) 
              ON CONFLICT (id) DO UPDATE SET data = $1`,
-            [newConfig, currentConfig.setupCompleted || false]
+            [finalConfig, currentConfig.setupCompleted || false]
         );
 
         configCache = null; // Cache invalidatie
@@ -2717,26 +2717,33 @@ apiRouter.post('/shares/:id/chunk', authenticateToken, uploadLimiter, chunkUploa
 
     if (!req.file) return res.status(400).json({ error: 'No data' });
 
-    // UNIEKE NAAM: Opslaan als .part bestand om corruptie te voorkomen
+    // UNIEKE NAAM: Opslaan als .part bestand (één bestand dat groeit)
     const safeFileName = path.basename(fileName);
-    const partFilePath = path.join(TEMP_DIR, `${id}_${fileId}_${safeFileName}.part_${chunkIndex}`);
+    const partFilePath = path.join(TEMP_DIR, `${id}_${fileId}_${safeFileName}.part`);
 
     try {
         const config = await getConfig();
         const maxBytes = getBytes(config.maxSizeVal || 10, config.maxSizeUnit || 'GB');
 
+        // Incremental Append Logic
+        const chunkIdx = parseInt(chunkIndex);
+
         // Check limiet alleen bij eerste chunk (bespaart DB calls)
-        if (parseInt(chunkIndex) === 0) {
+        if (chunkIdx === 0) {
             const usageRes = await pool.query('SELECT COALESCE(SUM(size), 0) as total FROM files WHERE share_id = $1', [id]);
             const currentTotal = parseInt(usageRes.rows[0].total);
             if (currentTotal + req.file.size > maxBytes) {
                 await safeUnlink(req.file.path);
                 return res.status(413).json({ error: `Share limit exceeded.` });
             }
+            // Start fresh for chunk 0
+            await safeUnlink(partFilePath);
         }
 
-        // Verplaats naar .part bestand (overschrijft veilig bij retry)
-        await fs.rename(req.file.path, partFilePath);
+        // Append chunk to the single .part file
+        const chunkData = await fs.readFile(req.file.path);
+        await fs.appendFile(partFilePath, chunkData);
+        await safeUnlink(req.file.path);
 
         res.json({ success: true });
     } catch (e) {
@@ -2777,14 +2784,17 @@ apiRouter.post('/shares/:id/finalize', authenticateToken, uploadLimiter, async (
             const safeExtension = path.extname(safeFileName);
             const finalPath = path.join(shareDir, crypto.randomBytes(8).toString('hex') + safeExtension);
 
-            const k = 1024;
-            const sizeMap: any = { 'KB': k, 'MB': k * k, 'GB': k * k * k, 'TB': k * k * k * k };
-            const chunkSizeVal = config.chunkSizeVal || 50;
-            const chunkSizeUnit = config.chunkSizeUnit || 'MB';
-            const CHUNK_SIZE = chunkSizeVal * (sizeMap[chunkSizeUnit] || sizeMap['MB']);
-            const totalChunks = Math.ceil(f.size / CHUNK_SIZE);
+            // Incremental Upload: Bestand is compleet in .part bestand
+            const partPath = path.join(TEMP_DIR, `${id}_${f.fileId}_${safeFileName}.part`);
 
-            await mergeChunks(path.join(TEMP_DIR, `${id}_${f.fileId}_${safeFileName}`), totalChunks, finalPath);
+            try {
+                // Rename direct naar final destination (Instant!)
+                await fs.rename(partPath, finalPath);
+            } catch (e) {
+                console.error(`Finalize error for ${f.fileName}:`, e);
+                // Fallback check voor legacy/fout
+                throw new Error(`Upload failed processing ${f.originalName}`);
+            }
 
 
 
@@ -3808,9 +3818,9 @@ apiRouter.post('/public/reverse/:id/chunk', checkUploadLimits, uploadLimiter, ch
 
     if (!req.file) return res.status(400).json({ error: 'No data' });
 
-    // UNIEKE NAAM: Opslaan als .part bestand om corruptie te voorkomen
+    // UNIEKE NAAM: Opslaan als .part bestand (één bestand dat groeit)
     const safeFileName = path.basename(fileName);
-    const partFilePath = path.join(TEMP_DIR, `rev_${id}_${fileId}_${safeFileName}.part_${chunkIndex}`);
+    const partFilePath = path.join(TEMP_DIR, `rev_${id}_${fileId}_${safeFileName}.part`);
 
     try {
         // 2. Database checks (Quota & Validiteit & PASSWORD)
@@ -3852,15 +3862,20 @@ apiRouter.post('/public/reverse/:id/chunk', checkUploadLimits, uploadLimiter, ch
         const currentDbUsage = parseInt(current_used);
 
         // Bij de EERSTE chunk checken we of het totale bestand nog past
-        if (parseInt(chunkIndex) === 0) {
+        const chunkIdx = parseInt(chunkIndex);
+        if (chunkIdx === 0) {
             if (maxSize > 0 && currentDbUsage >= maxSize) {
                 await safeUnlink(req.file.path);
                 return res.status(413).json({ error: `Share limit exceeded.` });
             }
+            // Start fresh
+            await safeUnlink(partFilePath);
         }
 
-        // 3. Verplaats de chunk naar zijn eigen .part bestand
-        await fs.rename(req.file.path, partFilePath);
+        // 3. Append chunk
+        const chunkData = await fs.readFile(req.file.path);
+        await fs.appendFile(partFilePath, chunkData);
+        await safeUnlink(req.file.path);
 
         res.json({ success: true });
     } catch (e: any) {
@@ -3934,12 +3949,16 @@ apiRouter.post('/public/reverse/:id/finalize', uploadLimiter, async (req, res) =
             await fs.mkdir(GUEST_DIR, { recursive: true });
             const finalPath = path.join(GUEST_DIR, uniqueName);
 
-            // Voeg samen
+            // Voeg samen (Rename .part file)
             const safeChunkName = path.basename(f.fileName);
             // Prefix for guest: rev_id_fileId_safeChunkName
-            const partPrefix = path.join(TEMP_DIR, `rev_${id}_${f.fileId}_${safeChunkName}`);
+            const partPath = path.join(TEMP_DIR, `rev_${id}_${f.fileId}_${safeChunkName}.part`);
 
-            await mergeChunks(partPrefix, totalChunks, finalPath);
+            try {
+                await fs.rename(partPath, finalPath);
+            } catch (e) {
+                throw new Error(`Upload failed processing ${f.originalName} (Part Missing)`);
+            }
 
             // Virusscan & Extensie check
             const sizeMultipliers: any = { 'KB': 1024, 'MB': 1024 * 1024, 'GB': 1024 * 1024 * 1024, 'TB': 1024 * 1024 * 1024 * 1024 };
