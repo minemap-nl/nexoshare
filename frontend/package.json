@@ -12,7 +12,7 @@
   "dependencies": {
     "@simplewebauthn/browser": "^13.2.2",
     "@types/prismjs": "^1.26.5",
-    "axios": "^1.13.2",
+    "axios": "^1.13.5",
     "dompurify": "^3.3.1",
     "framer-motion": "^12.23.26",
     "jszip": "^3.10.1",
