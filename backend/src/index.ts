@@ -2791,7 +2791,7 @@ apiRouter.post('/shares/:id/finalize', authenticateToken, uploadLimiter, async (
                 // Rename direct naar final destination (Instant!)
                 await fs.rename(partPath, finalPath);
             } catch (e) {
-                console.error(`Finalize error for ${f.fileName}:`, e);
+                console.error(`Finalize error for`, f.fileName, ':', e);
                 // Fallback check voor legacy/fout
                 throw new Error(`Upload failed processing ${f.originalName}`);
             }
