@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, createContext, useContext } from 'react';
+import React, { useState, useEffect, useRef, useCallback, createContext, useContext } from 'react';
 import { createPortal } from 'react-dom';
 import { AnimatePresence, motion } from 'framer-motion';
 
@@ -25,10 +25,71 @@ axios.defaults.withCredentials = true;
 
 const API_URL = '/api';
 
+/** Wordt getriggerd na upload-flow die de shares-lijst beïnvloedt (finalize, cancel, fout). My Shares luistert mee. */
+const SHARES_LIST_CHANGED_EVENT = 'famretera-shares-changed';
+const dispatchSharesListChanged = () => {
+    window.dispatchEvent(new CustomEvent(SHARES_LIST_CHANGED_EVENT));
+};
+
+/** Welk share-id krijgt momenteel chunked upload vanuit UploadView (null = geen). My Shares gebruikt dit om link-wijziging te blokkeren. */
+const ACTIVE_UPLOAD_SHARE_EVENT = 'famretera-active-upload-share';
+const dispatchActiveUploadShare = (shareId: string | null) => {
+    window.dispatchEvent(new CustomEvent(ACTIVE_UPLOAD_SHARE_EVENT, { detail: { shareId } }));
+};
+
+/** Na PUT /config, branding, enz.: alle schermen die `useAppConfig()` gebruiken verversen mee. */
+const CONFIG_CHANGED_EVENT = 'famretera-config-changed';
+function dispatchConfigChanged() {
+    window.dispatchEvent(new CustomEvent(CONFIG_CHANGED_EVENT));
+}
+
+// Upload persistence helpers using sessionStorage
+const saveUploadState = (data: { files?: any[], options?: any, progress?: number, uploading?: boolean, result?: any }) => {
+    try {
+        // Filter out File objects - they can't be serialized
+        const safeData = { ...data };
+        if (safeData.files) {
+            safeData.files = safeData.files.map((f: any) => ({
+                ...f,
+                file: undefined  // Remove File object
+            }));
+        }
+        sessionStorage.setItem('uploadState', JSON.stringify(safeData));
+    } catch {}
+};
+
+const loadUploadState = () => {
+    try {
+        const data = sessionStorage.getItem('uploadState');
+        return data ? JSON.parse(data) : null;
+    } catch { return null; }
+};
+
+const clearUploadState = () => {
+    try { sessionStorage.removeItem('uploadState'); } catch {}
+};
+
 const formatBytes = (b: any) => {
     if (!b) return '0 B';
     const k = 1024, sizes = ['B', 'KB', 'MB', 'GB', 'TB'], i = Math.floor(Math.log(b) / Math.log(k));
     return parseFloat((b / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+};
+
+// Helper: Compute SHA-256 hash of a chunk
+const computeChunkHash = async (chunk: Blob): Promise<string> => {
+    const buffer = await chunk.arrayBuffer();
+    const hashBuffer = await crypto.subtle.digest('SHA-256', buffer);
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+    return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+};
+
+// Helper: Exponential backoff with jitter
+const getBackoffDelay = (attempt: number): number => {
+    const baseDelay = 1000;
+    const maxDelay = 30000;
+    const exponentialDelay = Math.min(baseDelay * Math.pow(2, attempt), maxDelay);
+    const jitter = Math.random() * 0.3 * exponentialDelay;
+    return Math.floor(exponentialDelay + jitter);
 };
 
 // Crypto-veilige UUID generator voor browser
@@ -312,6 +373,71 @@ const useUI = () => {
     if (!context) throw new Error("useUI must be used within UIProvider");
     return context;
 };
+
+type AppConfigContextType = {
+    config: any;
+    refreshConfig: () => Promise<void>;
+    loading: boolean;
+};
+
+const AppConfigContext = createContext<AppConfigContextType | null>(null);
+
+function AppConfigProvider({ children }: { children: React.ReactNode }) {
+    const [config, setConfig] = useState<any>({});
+    const [loading, setLoading] = useState(true);
+
+    const refreshConfig = useCallback(async () => {
+        try {
+            const r = await fetch(`${API_URL}/config`, { credentials: 'include' });
+            if (r.ok) setConfig(await r.json());
+        } catch (e) {
+            console.error(e);
+        } finally {
+            setLoading(false);
+        }
+    }, []);
+
+    useEffect(() => {
+        void refreshConfig();
+    }, [refreshConfig]);
+
+    useEffect(() => {
+        const onCfg = () => { void refreshConfig(); };
+        window.addEventListener(CONFIG_CHANGED_EVENT, onCfg);
+        const onVis = () => {
+            if (document.visibilityState === 'visible') void refreshConfig();
+        };
+        document.addEventListener('visibilitychange', onVis);
+        return () => {
+            window.removeEventListener(CONFIG_CHANGED_EVENT, onCfg);
+            document.removeEventListener('visibilitychange', onVis);
+        };
+    }, [refreshConfig]);
+
+    useEffect(() => {
+        const url = config?.faviconUrl;
+        if (!url || typeof url !== 'string') return;
+        let link = document.querySelector("link[rel~='icon']") as HTMLLinkElement;
+        if (!link) {
+            link = document.createElement('link');
+            link.rel = 'icon';
+            document.getElementsByTagName('head')[0].appendChild(link);
+        }
+        link.href = url;
+    }, [config?.faviconUrl]);
+
+    return (
+        <AppConfigContext.Provider value={{ config, refreshConfig, loading }}>
+            {children}
+        </AppConfigContext.Provider>
+    );
+}
+
+function useAppConfig() {
+    const ctx = useContext(AppConfigContext);
+    if (!ctx) throw new Error('useAppConfig must be used within AppConfigProvider');
+    return ctx;
+}
 
 const useAuth = () => {
     // We slaan de token NIET meer op in state/localStorage, de browser doet dit in de cookie.
@@ -1145,6 +1271,9 @@ interface UploadItem {
     id: string;
     isDirectory: boolean;
     size: number;
+    uploadProgress?: number; // 0-100
+    uploading?: boolean;
+    cancelled?: boolean;
 }
 
 const traverseFileTree = async (item: any, path = ''): Promise<UploadItem[]> => {
@@ -1285,7 +1414,13 @@ const synthesizeDirectoryItems = (items: UploadItem[]): UploadItem[] => {
 
 
 
-const UploadView = () => {
+type UploadViewProps = {
+    active: boolean;
+    onUploadSurfaceChange?: (s: { showSuccess: boolean }) => void;
+    registerReset?: React.MutableRefObject<(() => void) | null>;
+};
+
+const UploadView = ({ active, onUploadSurfaceChange, registerReset }: UploadViewProps) => {
     const [files, setFiles] = useState<UploadItem[]>([]);
     const [uploading, setUploading] = useState(false);
     const [uploadProgress, setUploadProgress] = useState(0);
@@ -1300,11 +1435,52 @@ const UploadView = () => {
     const [contacts, setContacts] = useState<any[]>([]);
     const fileInputRef = useRef<HTMLInputElement>(null);
     const folderInputRef = useRef<HTMLInputElement>(null); // Nieue Ref voor mappen
+    /** Houdt altijd de laatste files/options bij voor async upload + sessionStorage (geen stale closure). */
+    const filesRef = useRef<UploadItem[]>(files);
+    const optionsRef = useRef(options);
+    const hasSeenSuccessWhileUploadTabActiveRef = useRef(false);
+    const pendingResetOnNextUploadFocusRef = useRef(false);
+    const prevActiveRef = useRef(active);
     const { notify, preview, isConfirming, isPreviewing } = useUI();
+
+    // Must not rely on useEffect: if the user switches tabs before effects run, hasSeen would stay false
+    // and leaving the Upload tab would never arm pendingReset (Docker / fast navigation).
+    if (active && result) {
+        hasSeenSuccessWhileUploadTabActiveRef.current = true;
+    }
+    const { config: appCfg } = useAppConfig();
+
+    useEffect(() => { filesRef.current = files; }, [files]);
+    useEffect(() => { optionsRef.current = options; }, [options]);
 
     useEscapeKey(() => setShowSettings(false), showSettings && !isConfirming && !isPreviewing);
     const [locale, setLocale] = useState('en-GB');
     const [maxLimitLabel, setMaxLimitLabel] = useState('');
+    const uploadDefaultsFromConfigApplied = useRef(false);
+
+    useEffect(() => {
+        const cfg = appCfg;
+        if (!cfg || typeof cfg !== 'object' || Object.keys(cfg).length === 0) return;
+        if (cfg.appLocale) setLocale(cfg.appLocale as string);
+        if (cfg.shareIdLength) {
+            const sl = parseInt(String(cfg.shareIdLength), 10);
+            if (!Number.isNaN(sl)) {
+                setIdLength(sl);
+                generateId(sl);
+            }
+        }
+        if (!uploadDefaultsFromConfigApplied.current) {
+            uploadDefaultsFromConfigApplied.current = true;
+            setOpts(prev => ({
+                ...prev,
+                expirationVal: (cfg.defaultExpirationVal as number) ?? 1,
+                expirationUnit: (cfg.defaultExpirationUnit as string) || 'Weeks'
+            }));
+        }
+        const maxVal = (cfg.maxSizeVal as number) ?? 10;
+        const maxUnit = (cfg.maxSizeUnit as string) || 'GB';
+        setMaxLimitLabel(`${maxVal} ${maxUnit}`);
+    }, [appCfg]);
 
     useEffect(() => {
         const loadData = async () => {
@@ -1317,22 +1493,19 @@ const UploadView = () => {
             } catch (e) { console.error(e); }
         };
         loadData();
-        fetch(`${API_URL}/config`, { credentials: 'include' }).then(r => r.json()).then(cfg => {
-            if (cfg.appLocale) setLocale(cfg.appLocale);
-            if (cfg.shareIdLength) {
-                setIdLength(parseInt(cfg.shareIdLength));
-                generateId(parseInt(cfg.shareIdLength));
+
+        // Restore from sessionStorage (page refresh). File/Blob objecten zijn niet te serialiseren — geen file-lijst herstellen.
+        const saved = loadUploadState();
+        if (saved) {
+            if (saved.options) setOpts(saved.options);
+            if (saved.result && !saved.uploading) setResult(saved.result);
+            // Na refresh bestaat er geen lopende JS-upload meer; voorkom valse "uploading" in storage/UI.
+            if (saved.uploading) {
+                clearUploadState();
+                const { uploading: _u, files: _f, progress: _p, ...kept } = saved;
+                saveUploadState({ ...kept, uploading: false });
             }
-            // Zet defaults vanuit config
-            setOpts(prev => ({
-                ...prev,
-                expirationVal: cfg.defaultExpirationVal || 1,
-                expirationUnit: cfg.defaultExpirationUnit || 'Weeks'
-            }));
-            const maxVal = cfg.maxSizeVal || 10; // Default fallback
-            const maxUnit = cfg.maxSizeUnit || 'GB';
-            setMaxLimitLabel(`${maxVal} ${maxUnit}`);
-        });
+        }
     }, []);
 
     const generateId = async (len: number) => {
@@ -1370,7 +1543,11 @@ const UploadView = () => {
             let flatFiles = results.flat();
 
             // Consolidate and Sort
-            setFiles(prev => sortFiles(synthesizeDirectoryItems([...prev, ...flatFiles])));
+            setFiles(prev => {
+                const updated = sortFiles(synthesizeDirectoryItems([...prev, ...flatFiles]));
+                if (!uploading) saveUploadState({ files: updated, options: optionsRef.current, uploading: false });
+                return updated;
+            });
         } else if (e.target.files) {
             // Fallback
             const newFiles = Array.from(e.target.files as FileList).map((f: any) => ({
@@ -1381,7 +1558,11 @@ const UploadView = () => {
                 isDirectory: false,
                 size: f.size
             }));
-            setFiles(prev => sortFiles(synthesizeDirectoryItems([...prev, ...newFiles])));
+            setFiles(prev => {
+                const updated = sortFiles(synthesizeDirectoryItems([...prev, ...newFiles]));
+                if (!uploading) saveUploadState({ files: updated, options: optionsRef.current, uploading: false });
+                return updated;
+            });
         }
 
         // Reset inputs
@@ -1399,7 +1580,11 @@ const UploadView = () => {
                 size: f.size
             }));
 
-            setFiles(prev => sortFiles(synthesizeDirectoryItems([...prev, ...newFiles])));
+            setFiles(prev => {
+                const updated = sortFiles(synthesizeDirectoryItems([...prev, ...newFiles]));
+                if (!uploading) saveUploadState({ files: updated, options: optionsRef.current, uploading: false });
+                return updated;
+            });
             e.target.value = '';
         }
     };
@@ -1412,7 +1597,11 @@ const UploadView = () => {
                 // @ts-ignore
                 const dirHandle = await window.showDirectoryPicker();
                 const items = await processHandle(dirHandle);
-                setFiles(prev => sortFiles(synthesizeDirectoryItems([...prev, ...items]))); // synthesize call ensures robustness even if API returns perfect structure
+                setFiles(prev => {
+                    const updated = sortFiles(synthesizeDirectoryItems([...prev, ...items]));
+                    if (!uploading) saveUploadState({ files: updated, options: optionsRef.current, uploading: false });
+                    return updated;
+                });
             } else {
                 // Fallback for Safari/Firefox
                 folderInputRef.current?.click();
@@ -1426,131 +1615,295 @@ const UploadView = () => {
         }
     };
 
+    // Warn before leaving page during upload
+    useEffect(() => {
+        const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+            if ((window as any).__uploading) {
+                e.preventDefault();
+                e.returnValue = 'Upload in progress. Are you sure you want to leave?';
+                return e.returnValue;
+            }
+        };
+        window.addEventListener('beforeunload', handleBeforeUnload);
+        return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+    }, []);
+
     const handleUpload = async () => {
         setUploading(true);
         setShowSettings(false);
         setUploadProgress(0);
-        let currentShareId: string | null = null; // ID onthouden voor cleanup
+        (window as any).__uploading = true;
+
+        let currentShareId: string | null = null;
+        /** Voorkomt dat finally sessionStorage opnieuw vult na clearUploadState (cancel / lege upload / success). */
+        let storageHandled = false;
+
+        const optsNow = optionsRef.current;
+        saveUploadState({ files: filesRef.current, options: optsNow, uploading: true, progress: 0 });
 
         try {
             const configRes = await fetch(`${API_URL}/config`, { credentials: 'include' });
             const config = await configRes.json();
 
-            // 1. VOORAF CHECKEN OP LIMIETEN
             const k = 1024;
             const sizeMap: any = { 'KB': k, 'MB': k * k, 'GB': k * k * k, 'TB': k * k * k * k };
             const maxBytes = (config.maxSizeVal || 10) * (sizeMap[config.maxSizeUnit] || sizeMap['MB']);
 
-            const uploadableFiles = files.filter(f => !f.isDirectory && f.file); // Filter out folders for upload mechanics
+            const uploadableFiles = filesRef.current.filter(f => !f.isDirectory && f.file && !f.cancelled);
             const totalUploadSize = uploadableFiles.reduce((acc, item) => acc + item.size, 0);
+
+            if (uploadableFiles.length === 0) {
+                notify('No files to upload', 'error');
+                return;
+            }
 
             if (totalUploadSize > maxBytes) {
                 throw new Error(`Total size (${formatBytes(totalUploadSize)}) exceeds the limit of ${config.maxSizeVal} ${config.maxSizeUnit}.`);
             }
 
-            const chunkSizeVal = config.chunkSizeVal || 50;
+            const chunkSizeVal = config.chunkSizeVal || 20;
             const chunkSizeUnit = config.chunkSizeUnit || 'MB';
             const CHUNK_SIZE = chunkSizeVal * (sizeMap[chunkSizeUnit] || sizeMap['MB']);
 
-            const initPayload = { ...options };
+            const initPayload = { ...optsNow, totalUploadBytes: totalUploadSize };
             const initRes = await axios.post(`${API_URL}/shares/init`, initPayload);
 
             if (!initRes.data.success) throw new Error('Initialization failed');
 
             const shareId = initRes.data.shareId;
             currentShareId = shareId;
+            dispatchActiveUploadShare(shareId);
 
-            const uploadedFilesMeta = [];
+            const uploadedFilesMeta: { fileName: string; originalName: string; fileId: string; size: number; mimeType: string }[] = [];
             let uploadedBytes = 0;
-            let totalBytes = totalUploadSize;
+            const totalBytes = Math.max(totalUploadSize, 1);
 
-            // We use standard loop to handle async await in order
-            for (const item of uploadableFiles) {
-                const file = item.file as File;
-                const fileId = generateUUID();
-                const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+            const abortController = new AbortController();
+            (window as any).__uploadAbortController = abortController;
 
-                for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
-                    const start = chunkIndex * CHUNK_SIZE;
-                    const end = Math.min(start + CHUNK_SIZE, file.size);
-                    const chunk = file.slice(start, end);
+            const MAX_PARALLEL_CHUNKS = 3;
 
-                    const fd = new FormData();
-                    fd.append('chunk', chunk);
-                    fd.append('chunkIndex', chunkIndex.toString());
-                    fd.append('totalChunks', totalChunks.toString());
-                    fd.append('fileName', file.name);
-                    fd.append('fileId', fileId);
+            const uploadChunk = async (file: File, fileId: string, chunkIndex: number, totalChunks: number): Promise<boolean> => {
+                const start = chunkIndex * CHUNK_SIZE;
+                const end = Math.min(start + CHUNK_SIZE, file.size);
+                const chunk = file.slice(start, end);
+                const chunkHash = await computeChunkHash(chunk);
 
-                    // --- RETRY LOGICA (AUTO-HERSTEL) ---
-                    let attempts = 0;
-                    const maxAttempts = 10;
-                    let success = false;
+                const fd = new FormData();
+                fd.append('chunk', chunk);
+                fd.append('chunkIndex', chunkIndex.toString());
+                fd.append('totalChunks', totalChunks.toString());
+                fd.append('fileName', file.name);
+                fd.append('fileId', fileId);
+                fd.append('totalFileSize', String(file.size));
+                fd.append('chunkHash', chunkHash);
 
-                    while (!success && attempts < maxAttempts) {
-                        try {
-                            await axios.post(`${API_URL}/shares/${shareId}/chunk`, fd);
-                            success = true;
-                        } catch (err) {
-                            attempts++;
-                            console.warn(`Chunk ${chunkIndex} failed, retrying (${attempts}/${maxAttempts})...`);
-                            if (attempts >= maxAttempts) throw new Error(`Upload failed after ${maxAttempts} attempts.`);
-                            await new Promise(res => setTimeout(res, 1000 * attempts)); // Backoff
+                let attempts = 0;
+                const maxAttempts = 10;
+
+                while (attempts < maxAttempts) {
+                    try {
+                        await axios.post(`${API_URL}/shares/${shareId}/chunk`, fd, {
+                            headers: { 'X-Chunk-Size': CHUNK_SIZE.toString() },
+                            signal: abortController.signal
+                        });
+                        return true;
+                    } catch (err: any) {
+                        if (err.name === 'AbortError' || err.message?.includes('cancel')) {
+                            return false;
                         }
+                        attempts++;
+                        if (err.response?.status === 400 || err.response?.status === 413) {
+                            throw err;
+                        }
+                        console.warn(`Chunk ${chunkIndex} failed, retrying (${attempts}/${maxAttempts})...`);
+                        if (attempts >= maxAttempts) throw new Error(`Upload failed after ${maxAttempts} attempts.`);
+                        await new Promise(res => setTimeout(res, getBackoffDelay(attempts)));
                     }
+                }
+                return false;
+            };
 
-                    uploadedBytes += chunk.size;
-                    setUploadProgress(Math.round((uploadedBytes * 100) / totalBytes));
+            for (const item of uploadableFiles) {
+                const currentFileState = filesRef.current.find(f => f.id === item.id);
+                if (!currentFileState || currentFileState.cancelled) {
+                    continue;
                 }
 
-                uploadedFilesMeta.push({
-                    fileName: file.name,
-                    originalName: item.path, // Use the Wrapper Path!
-                    fileId: fileId,
-                    size: file.size,
-                    mimeType: file.type
-                });
+                const file = item.file as File;
+                const fileId = generateUUID();
+                const totalChunks = Math.max(1, Math.ceil(file.size / CHUNK_SIZE));
+
+                // Chunk 0 eerst: server vereist bestaand .part voordat latere chunks (parallel) mogen.
+                if (totalChunks > 0) {
+                    const ok0 = await uploadChunk(file, fileId, 0, totalChunks);
+                    if (!ok0) throw new Error('cancelled');
+                    uploadedBytes += Math.min(CHUNK_SIZE, file.size);
+                }
+                for (let batchStart = 1; batchStart < totalChunks; batchStart += MAX_PARALLEL_CHUNKS) {
+                    const batchEnd = Math.min(batchStart + MAX_PARALLEL_CHUNKS, totalChunks);
+                    const batchPromises: Promise<boolean>[] = [];
+
+                    for (let chunkIndex = batchStart; chunkIndex < batchEnd; chunkIndex++) {
+                        batchPromises.push(uploadChunk(file, fileId, chunkIndex, totalChunks));
+                    }
+
+                    const results = await Promise.all(batchPromises);
+
+                    if (results.includes(false)) {
+                        throw new Error('cancelled');
+                    }
+
+                    uploadedBytes += (batchEnd - batchStart) * CHUNK_SIZE;
+                    const progress = Math.min(Math.round((uploadedBytes * 100) / totalBytes), 99);
+                    setUploadProgress(progress);
+
+                    setFiles(prev => {
+                        const updated = prev.map(f =>
+                            f.id === item.id
+                                ? { ...f, uploadProgress: Math.min(Math.round((batchEnd / totalChunks) * 100), 99) }
+                                : f
+                        );
+                        saveUploadState({
+                            files: updated,
+                            options: optionsRef.current,
+                            uploading: true,
+                            progress: Math.min(Math.round((uploadedBytes * 100) / totalBytes), 99)
+                        });
+                        return updated;
+                    });
+                }
+
+                const fileState = filesRef.current.find(f => f.id === item.id);
+                if (!fileState?.cancelled) {
+                    uploadedFilesMeta.push({
+                        fileName: file.name,
+                        originalName: item.path,
+                        fileId: fileId,
+                        size: file.size,
+                        mimeType: file.type
+                    });
+                }
             }
 
             setUploadProgress(99);
+
+            if (uploadedFilesMeta.length === 0) {
+                setFiles([]);
+                clearUploadState();
+                storageHandled = true;
+                notify('Upload cancelled', 'info');
+                try { await axios.delete(`${API_URL}/shares/${shareId}`); } catch { /* noop */ }
+                dispatchSharesListChanged();
+                return;
+            }
+
             const finalRes = await axios.post(`${API_URL}/shares/${shareId}/finalize`, {
                 files: uploadedFilesMeta
             });
 
             if (finalRes.data.success) {
                 setResult(finalRes.data);
-                setFiles([]);
+                storageHandled = true;
+                saveUploadState({ files: [], options: optionsRef.current, uploading: false, result: finalRes.data });
                 notify("Successfully uploaded!", "success");
+                dispatchSharesListChanged();
+                setTimeout(() => {
+                    clearUploadState();
+                    setFiles([]);
+                }, 2000);
             }
 
         } catch (e: any) {
-            // 2. CLEANUP: VERWIJDER LEGE MAP BIJ FOUTEN
+            if (e.name === 'AbortError' || e.message?.includes('cancelled')) {
+                if (currentShareId) {
+                    try { await axios.delete(`${API_URL}/shares/${currentShareId}`); } catch { /* noop */ }
+                }
+                try {
+                    const res = await fetch(`${API_URL}/utils/generate-id?length=12`, { credentials: 'include' });
+                    const data = await res.json();
+                    if (data.id) setOpts(prev => ({ ...prev, customSlug: data.id }));
+                } catch { /* noop */ }
+                setFiles(prev => prev.map(f => ({ ...f, cancelled: false, uploadProgress: 0 })));
+                notify("Upload cancelled", "info");
+                clearUploadState();
+                storageHandled = true;
+                dispatchSharesListChanged();
+                return;
+            }
+
             if (currentShareId) {
                 try {
-                    console.log('Cleaning up failed share:', currentShareId);
                     await axios.delete(`${API_URL}/shares/${currentShareId}`);
                 } catch (cleanupErr) { console.error("Cleanup failed", cleanupErr); }
+                dispatchSharesListChanged();
             }
 
             const msg = e.response?.data?.error || e.message || 'Upload failed';
             notify(msg, "error");
         } finally {
+            dispatchActiveUploadShare(null);
+            delete (window as any).__uploadAbortController;
+            delete (window as any).__uploading;
             setUploading(false);
             setUploadProgress(0);
+            setFiles(prev => {
+                const next = prev.map(f => ({ ...f, cancelled: false, uploadProgress: 0 }));
+                if (!storageHandled) {
+                    saveUploadState({
+                        files: next,
+                        options: optionsRef.current,
+                        uploading: false,
+                        progress: 0
+                    });
+                }
+                return next;
+            });
         }
     };
 
-    const reset = () => {
+    const [qrCode, setQrCode] = useState<string | null>(null);
+
+    const reset = useCallback(() => {
+        pendingResetOnNextUploadFocusRef.current = false;
+        hasSeenSuccessWhileUploadTabActiveRef.current = false;
         setResult(null);
+        setQrCode(null);
+        clearUploadState();
         setOpts({
             name: '', password: '', recipients: '', message: '', customSlug: '',
             expirationVal: 1, expirationUnit: 'Weeks', maxDownloads: undefined
         });
         generateId(idLength);
-    };
+    }, [idLength]);
 
-    // QR Logic binnen de component
-    const [qrCode, setQrCode] = useState<string | null>(null);
+    useEffect(() => {
+        onUploadSurfaceChange?.({ showSuccess: !!result });
+    }, [result, onUploadSurfaceChange]);
+
+    useEffect(() => {
+        if (registerReset) {
+            registerReset.current = () => reset();
+            return () => { registerReset.current = null; };
+        }
+    }, [registerReset, reset]);
+
+    useEffect(() => {
+        const prev = prevActiveRef.current;
+        if (prev && !active) {
+            if (result && hasSeenSuccessWhileUploadTabActiveRef.current) {
+                pendingResetOnNextUploadFocusRef.current = true;
+            }
+        }
+        if (!prev && active) {
+            if (pendingResetOnNextUploadFocusRef.current) {
+                pendingResetOnNextUploadFocusRef.current = false;
+                hasSeenSuccessWhileUploadTabActiveRef.current = false;
+                reset();
+            }
+        }
+        prevActiveRef.current = active;
+    }, [active, result, reset]);
 
     useEffect(() => {
         if (result?.shareUrl) {
@@ -1564,8 +1917,10 @@ const UploadView = () => {
     if (result) return (
         <div className="bg-neutral-900 p-4 md:p-8 rounded-2xl border border-neutral-800 text-center max-w-xl mx-auto mt-10 shadow-2xl anim-scale">
             <div className="w-16 h-16 md:w-20 md:h-20 bg-purple-600/20 rounded-full flex items-center justify-center mx-auto mb-4 md:mb-6"><Check className="text-purple-500 w-8 h-8 md:w-10 md:h-10" /></div>
-            <h2 className="text-2xl md:text-3xl font-bold text-white mb-2">Files Shared!</h2>
-            <p className="text-neutral-400 mb-6">The recipients have been notified.</p>
+            <h2 className={`text-2xl md:text-3xl font-bold text-white ${result.recipientsNotified === true ? 'mb-2' : 'mb-6'}`}>Files Shared!</h2>
+            {result.recipientsNotified === true && (
+                <p className="text-neutral-400 mb-6">The recipients have been notified.</p>
+            )}
 
             <div className="bg-black/50 p-4 rounded-xl mb-6 border border-neutral-800">
                 <div className="flex items-center gap-3 mb-4">
@@ -1610,14 +1965,20 @@ const UploadView = () => {
     );
 
     return (
-        <div className="relative anim-fade">
-            <div className="bg-neutral-900 border-2 border-dashed border-neutral-800 rounded-2xl md:p-10 flex flex-col items-center justify-center min-h-[250px] md:min-h-[300px] hover:border-purple-500 hover:bg-neutral-900/80 transition-all duration-300 group relative overflow-hidden"
+        <div className="relative">
+            {!uploading && (
+            <div
+                className="isolate group relative flex flex-col items-center justify-center overflow-hidden rounded-2xl bg-neutral-900 md:p-10 min-h-[250px] md:min-h-[300px] outline-none focus-visible:outline-none [transform:translateZ(0)] [backface-visibility:hidden]"
                 onDragOver={e => e.preventDefault()}
                 onDrop={handleDrop}
             >
+                {/* Rand: géén transition op border-color (geeft wit tussenframes) — paarse rand als aparte laag met opacity-tween */}
+                <div className="pointer-events-none absolute inset-0 z-0 rounded-2xl bg-purple-500/[0.06] opacity-0 transition-opacity duration-300 ease-out group-hover:opacity-100" aria-hidden />
+                <div className="pointer-events-none absolute inset-0 z-[1] rounded-2xl border-2 border-dashed border-neutral-800" aria-hidden />
+                <div className="pointer-events-none absolute inset-0 z-[2] rounded-2xl border-2 border-dashed border-purple-500 opacity-0 transition-opacity duration-300 ease-out group-hover:opacity-100" aria-hidden />
                 {/* 1. Invisible Click Overlay for File Upload - Acts as background click */}
                 <div
-                    className="absolute inset-0 z-0 cursor-pointer"
+                    className="absolute inset-0 z-[3] cursor-pointer"
                     onClick={() => fileInputRef.current?.click()}
                 />
 
@@ -1628,7 +1989,7 @@ const UploadView = () => {
 
                 {/* 3. Content - Pointer events none on text/icon so clicks fall through to overlay */}
                 <div className="relative z-10 pointer-events-none flex flex-col items-center p-6">
-                    <div className="bg-black p-3 md:p-4 rounded-full mb-3 md:mb-4 group-hover:scale-110 transition-transform duration-300"><Upload className="w-8 h-8 md:w-10 md:h-10 text-purple-500" /></div>
+                    <div className="bg-black p-3 md:p-4 rounded-full mb-3 md:mb-4 transition-transform duration-300 group-hover:scale-110"><Upload className="w-8 h-8 md:w-10 md:h-10 text-purple-500" /></div>
                     <h2 className="text-xl md:text-2xl font-bold text-white mb-2">Upload files or folders</h2>
                     <p className="text-sm md:text-base text-neutral-400 text-center max-w-sm">Drag files & folders here, or click to browse files.</p>
                 </div>
@@ -1639,17 +2000,18 @@ const UploadView = () => {
                     <button onClick={(e) => { e.stopPropagation(); onPickFolder(); }} className="text-xs bg-neutral-800 hover:bg-neutral-700 text-white px-3 py-2 rounded-lg transition border border-neutral-700 flex items-center gap-2 cursor-pointer hover:border-purple-500"><FolderIcon className="w-3 h-3" /> Select Folder</button>
                 </div>
                 {maxLimitLabel && (
-                    <div className="mt-0 px-3 py-1 rounded-full bg-neutral-800 border border-neutral-700 text-xs text-neutral-400 font-medium group-hover:border-purple-500/30 group-hover:text-purple-300 transition-colors mb-4 md:mb-0">
+                    <div className="mt-0 px-3 py-1 rounded-full bg-neutral-800 border border-neutral-700 text-xs text-neutral-400 font-medium group-hover:border-purple-500/30 group-hover:text-purple-300 mb-4 md:mb-0">
                         Max size: {maxLimitLabel}
                     </div>
                 )}
             </div>
+            )}
 
             {files.length > 0 && (
                 <div className="mt-2 anim-slide bg-neutral-900 rounded-2xl border border-neutral-800 overflow-hidden shadow-xl" style={{ "--indent-step": "24px" } as React.CSSProperties}>
                     <style>{`@media (max-width: 768px) { .anim-slide { --indent-step: 12px !important; } }`}</style>
                     <div className="max-h-[300px] overflow-y-auto">
-                        {files.map((item) => {
+                        {files.filter(f => !f.cancelled || uploading).map((item) => {
                             // Calculate depth for indentation
                             // Example path: Folder/Sub/file.txt (depth 2)
                             // Example folder: Folder/Sub (depth 1)
@@ -1668,7 +2030,15 @@ const UploadView = () => {
                                         onClick={() => !item.isDirectory && item.file && preview(item.file, item.name)}
                                     >
                                         <div className="bg-black p-2 rounded-lg flex-shrink-0 relative">
-                                            {item.isDirectory ? (
+                                            {item.uploadProgress !== undefined && item.uploadProgress > 0 ? (
+                                                <div className="relative w-8 h-8">
+                                                    <svg className="w-full h-full transform -rotate-90" viewBox="0 0 36 36">
+                                                        <circle cx="18" cy="18" r="16" fill="none" stroke="#374151" strokeWidth="3"/>
+                                                        <circle cx="18" cy="18" r="16" fill="none" stroke="#8b5cf6" strokeWidth="3" 
+                                                            strokeDasharray="100" strokeLinecap="round" style={{strokeDashoffset: 100 - item.uploadProgress}}/>
+                                                    </svg>
+                                                </div>
+                                            ) : item.isDirectory ? (
                                                 <FolderIcon className="w-4 h-4 text-purple-400" />
                                             ) : (
                                                 <div className="uppercase text-xs font-bold text-purple-400">{item.name.split('.').pop()}</div>
@@ -1693,10 +2063,28 @@ const UploadView = () => {
                                     </button>
                                     <button onClick={(e) => {
                                         e.stopPropagation();
-                                        // If removing a directory, maybe remove all children? For now just remove the item.
-                                        // Smart removal: remove this item AND any item that starts with its path!
-                                        setFiles(files.filter(x => x.id !== item.id && !x.path.startsWith(item.path + '/')))
-                                    }} className="text-neutral-500 hover:text-red-400 p-2 transition flex-shrink-0"><X className="w-4 h-4 md:w-5 md:h-5" /></button>
+                                        if (uploading) {
+                                            // Mark as cancelled during upload
+                                            setFiles(prev => prev.map(f => 
+                                                (f.id === item.id || f.path.startsWith(item.path + '/'))
+                                                    ? { ...f, cancelled: true }
+                                                    : f
+                                            ));
+                                            // Abort the upload
+                                            const abortCtrl = (window as any).__uploadAbortController;
+                                            if (abortCtrl) {
+                                                abortCtrl.abort();
+                                            }
+                                        } else {
+                                            setFiles(prev => {
+                                                const next = prev.filter(x => x.id !== item.id && !x.path.startsWith(item.path + '/'));
+                                                saveUploadState({ files: next, options: optionsRef.current, uploading: false });
+                                                return next;
+                                            });
+                                        }
+                                    }} className="text-neutral-500 hover:text-red-400 p-2 transition flex-shrink-0">
+                                        {item.cancelled ? <XCircle className="w-4 h-4 md:w-5 md:h-5 text-red-500" /> : <X className="w-4 h-4 md:w-5 md:h-5" />}
+                                    </button>
                                 </div>
                             )
                         })}
@@ -1850,22 +2238,23 @@ const UploadView = () => {
     );
 };
 
-const MySharesView = () => {
+const MySharesView = ({ active }: { active: boolean }) => {
     const [shares, setShares] = useState<any[]>([]);
     const [editing, setEditing] = useState<any>(null);
+    const [activeUploadShareId, setActiveUploadShareId] = useState<string | null>(null);
     const [newFiles, setNewFiles] = useState<File[]>([]);
     const [editProgress, setEditProgress] = useState(0);
     const [isSaving, setIsSaving] = useState(false);
     const [resending, setResending] = useState<any>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
     const { notify, confirm, preview, isConfirming, isPreviewing } = useUI();
+    const { config: msCfg } = useAppConfig();
 
     // Esc keys
     useEscapeKey(() => setEditing(null), !!editing && !isConfirming && !isPreviewing);
     useEscapeKey(() => setResending(null), !!resending && !isConfirming && !isPreviewing);
 
-    useEffect(() => { load(); }, []);
-    const load = async () => {
+    const load = useCallback(async () => {
         try {
             const res = await fetch(`${API_URL}/shares`, { credentials: 'include' });
             if (res.ok) {
@@ -1880,12 +2269,33 @@ const MySharesView = () => {
         } catch (e) {
             console.error("Error loading shares:", e);
         }
-    };
+    }, []);
+
+    // Tab blijft gemount maar hidden: ververs lijst telkens als je naar My Shares gaat (nieuwe shares, edits elders).
+    useEffect(() => {
+        if (!active) return;
+        load();
+    }, [active, load]);
+
+    useEffect(() => {
+        const onSharesChanged = () => { void load(); };
+        window.addEventListener(SHARES_LIST_CHANGED_EVENT, onSharesChanged);
+        return () => window.removeEventListener(SHARES_LIST_CHANGED_EVENT, onSharesChanged);
+    }, [load]);
+
+    useEffect(() => {
+        const onActiveUpload = (ev: Event) => {
+            const d = (ev as CustomEvent<{ shareId: string | null }>).detail;
+            setActiveUploadShareId(d?.shareId ?? null);
+        };
+        window.addEventListener(ACTIVE_UPLOAD_SHARE_EVENT, onActiveUpload);
+        return () => window.removeEventListener(ACTIVE_UPLOAD_SHARE_EVENT, onActiveUpload);
+    }, []);
 
     const deleteShare = async (id: string) => {
         confirm("Are you sure you want to delete this share? This cannot be undone.", async () => {
             await fetch(`${API_URL}/shares/${id}`, { method: 'DELETE', credentials: 'include' });
-            setShares(shares.filter(s => s.id !== id));
+            setShares(prev => prev.filter(s => s.id !== id));
             notify("Share deleted", "success");
         });
     };
@@ -1964,36 +2374,78 @@ const MySharesView = () => {
         // We gebruiken de bestaande chunked upload logica, maar naar de 'stage' endpoint
 
         try {
-            const configRes = await fetch(`${API_URL}/config`, { credentials: 'include' });
-            const config = await configRes.json();
+            const cfg = msCfg;
             const k = 1024;
             const map: any = { 'KB': k, 'MB': k * k };
-            const CHUNK_SIZE = (config.chunkSizeVal || 50) * (map[config.chunkSizeUnit || 'MB'] || k * k);
+            const CHUNK_SIZE = ((cfg?.chunkSizeVal as number) || 20) * (map[(cfg?.chunkSizeUnit as string) || 'MB'] || k * k);
 
             const uploadedFilesMeta = [];
             let totalBytes = files.reduce((acc, f) => acc + f.size, 0);
             let uploadedBytes = 0;
 
+            // Abort controller
+            const abortController = new AbortController();
+            (window as any).__uploadAbortController = abortController;
+
+            const uploadChunk = async (file: File, fileId: string, chunkIndex: number, totalChunks: number): Promise<boolean> => {
+                const start = chunkIndex * CHUNK_SIZE;
+                const end = Math.min(start + CHUNK_SIZE, file.size);
+                const chunk = file.slice(start, end);
+                
+                const chunkHash = await computeChunkHash(chunk);
+                
+                const chunkFd = new FormData();
+                chunkFd.append('chunk', chunk);
+                chunkFd.append('chunkIndex', chunkIndex.toString());
+                chunkFd.append('totalChunks', totalChunks.toString());
+                chunkFd.append('fileName', file.name);
+                chunkFd.append('fileId', fileId);
+                chunkFd.append('chunkHash', chunkHash);
+
+                let attempts = 0;
+                const maxAttempts = 10;
+                while (attempts < maxAttempts) {
+                    try {
+                        await axios.post(`${API_URL}/shares/${editing.id}/chunk`, chunkFd, {
+                            headers: { 'X-Chunk-Size': CHUNK_SIZE.toString() },
+                            signal: abortController.signal
+                        });
+                        return true;
+                    } catch (err: any) {
+                        attempts++;
+                        if (err.name === 'AbortError' || err.message?.includes('cancel')) return false;
+                        if (err.response?.status === 400 || err.response?.status === 413) throw err;
+                        if (attempts >= maxAttempts) throw new Error('Upload failed');
+                        await new Promise(res => setTimeout(res, getBackoffDelay(attempts)));
+                    }
+                }
+                return false;
+            };
+
+            const MAX_PARALLEL = 3;
+            
             for (const file of files) {
                 const fileId = generateUUID();
                 const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
 
-                for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
-                    const start = chunkIndex * CHUNK_SIZE;
-                    const end = Math.min(start + CHUNK_SIZE, file.size);
-                    const chunk = file.slice(start, end);
-
-                    const chunkFd = new FormData();
-                    chunkFd.append('chunk', chunk);
-                    chunkFd.append('chunkIndex', chunkIndex.toString());
-                    chunkFd.append('totalChunks', totalChunks.toString());
-                    chunkFd.append('fileName', file.name);
-                    chunkFd.append('fileId', fileId);
-
-                    await axios.post(`${API_URL}/shares/${editing.id}/chunk`, chunkFd);
-
-                    uploadedBytes += chunk.size;
-                    setEditProgress(Math.round((uploadedBytes * 100) / totalBytes));
+                if (totalChunks > 0) {
+                    const ok0 = await uploadChunk(file, fileId, 0, totalChunks);
+                    if (!ok0) throw new Error('cancelled');
+                    uploadedBytes += Math.min(CHUNK_SIZE, file.size);
+                    setEditProgress(Math.min(Math.round((uploadedBytes * 100) / totalBytes), 99));
+                }
+                for (let batchStart = 1; batchStart < totalChunks; batchStart += MAX_PARALLEL) {
+                    const batchEnd = Math.min(batchStart + MAX_PARALLEL, totalChunks);
+                    const promises = [];
+                    for (let chunkIndex = batchStart; chunkIndex < batchEnd; chunkIndex++) {
+                        promises.push(uploadChunk(file, fileId, chunkIndex, totalChunks));
+                    }
+                    const results = await Promise.all(promises);
+                    if (results.includes(false)) {
+                        throw new Error('cancelled');
+                    }
+                    uploadedBytes += (batchEnd - batchStart) * CHUNK_SIZE;
+                    setEditProgress(Math.min(Math.round((uploadedBytes * 100) / totalBytes), 99));
                 }
 
                 uploadedFilesMeta.push({
@@ -2161,7 +2613,18 @@ const MySharesView = () => {
                                 {/* Naam & Link */}
                                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                                     <div><label className="text-xs font-bold text-neutral-500 uppercase mb-1 block">Name</label><input className="w-full bg-black border border-neutral-700 rounded-lg p-3 text-white focus:border-purple-500 outline-none transition" value={editing.name} onChange={e => setEditing({ ...editing, name: e.target.value })} /></div>
-                                    <div><label className="text-xs font-bold text-neutral-500 uppercase mb-1 block">Link / ID</label><input className="w-full bg-black border border-neutral-700 rounded-lg p-3 text-white focus:border-purple-500 outline-none transition" defaultValue={editing.id} onChange={e => setEditing({ ...editing, newSlug: e.target.value })} /></div>
+                                    <div>
+                                        <label className="text-xs font-bold text-neutral-500 uppercase mb-1 block">Link / ID</label>
+                                        <input
+                                            className={`w-full bg-black border rounded-lg p-3 text-white focus:border-purple-500 outline-none transition ${editing.id === activeUploadShareId ? 'border-neutral-600 opacity-60 cursor-not-allowed' : 'border-neutral-700'}`}
+                                            defaultValue={editing.id}
+                                            disabled={editing.id === activeUploadShareId}
+                                            onChange={e => setEditing({ ...editing, newSlug: e.target.value })}
+                                        />
+                                        {editing.id === activeUploadShareId && (
+                                            <p className="text-[11px] text-amber-500/90 mt-1.5">Link cannot be changed while a file upload to this share is still running (from the Upload tab). Other fields can still be edited.</p>
+                                        )}
+                                    </div>
                                 </div>
 
                                 {/* Password & Expiration */}
@@ -2412,7 +2875,7 @@ const MySharesView = () => {
     );
 };
 
-const ReverseView = () => {
+const ReverseView = ({ active }: { active: boolean }) => {
     const [shares, setShares] = useState<any[]>([]);
     const [createMode, setCreateMode] = useState(false);
     const [viewFiles, setViewFiles] = useState<any>(null);
@@ -2433,23 +2896,40 @@ const ReverseView = () => {
     const [idLength, setIdLength] = useState(12);
     const [copiedId, setCopiedId] = useState<string | null>(null);
     const { notify, confirm, preview, isConfirming, isPreviewing } = useUI();
+    const { config: revCfg } = useAppConfig();
 
     // Esc keys
     useEscapeKey(() => setCreateMode(false), createMode && !isConfirming && !isPreviewing);
     useEscapeKey(() => setViewFiles(null), !!viewFiles && !isConfirming && !isPreviewing);
 
     useEffect(() => {
-        load();
-        // Initial ID generation
-        fetch(`${API_URL}/config`, { credentials: 'include' }).then(r => r.json()).then(cfg => {
-            if (cfg.shareIdLength) {
-                setIdLength(parseInt(cfg.shareIdLength));
-                generateId(parseInt(cfg.shareIdLength));
-            } else {
-                generateId(12);
+        const cfg = revCfg;
+        if (!cfg || typeof cfg !== 'object' || Object.keys(cfg).length === 0) return;
+        if (cfg.shareIdLength) {
+            const sl = parseInt(String(cfg.shareIdLength), 10);
+            if (!Number.isNaN(sl)) {
+                setIdLength(sl);
+                generateId(sl);
+                return;
             }
-        });
+        }
+        generateId(12);
+    }, [revCfg]);
+
+    const loadReverse = useCallback(async () => {
+        try {
+            const res = await fetch(`${API_URL}/reverse`, { credentials: 'include' });
+            if (res.ok) {
+                const data = await res.json();
+                if (Array.isArray(data)) setShares(data);
+            }
+        } catch (e) { console.error(e); }
     }, []);
+
+    useEffect(() => {
+        if (!active) return;
+        loadReverse();
+    }, [active, loadReverse]);
 
     const generateId = async (len: number) => {
         try {
@@ -2459,15 +2939,6 @@ const ReverseView = () => {
         } catch (e) { console.error(e); }
     };
 
-    const load = async () => {
-        try {
-            const res = await fetch(`${API_URL}/reverse`, { credentials: 'include' });
-            if (res.ok) {
-                const data = await res.json();
-                if (Array.isArray(data)) setShares(data);
-            }
-        } catch (e) { console.error(e); }
-    };
     const create = async () => {
         // Bereken bytes op basis van gekozen unit
         const multiplier = newShare.maxSizeUnit === 'GB' ? 1024 * 1024 * 1024 : 1024 * 1024;
@@ -2491,14 +2962,14 @@ const ReverseView = () => {
                 expirationUnit: 'Weeks', password: '', notify: true,
                 sendEmailTo: '', thankYouMessage: '', customSlug: ''
             });
-            load();
+            loadReverse();
             notify("Reverse share created", "success");
         } else {
             const data = await res.json();
             notify(data.error || "Creation failed", "error");
         }
     };
-    const deleteReverse = async (id: string) => { confirm("Delete?", async () => { await fetch(`${API_URL}/reverse/${id}`, { method: 'DELETE', credentials: 'include' }); load(); notify("Deleted", "success"); }); };
+    const deleteReverse = async (id: string) => { confirm("Delete?", async () => { await fetch(`${API_URL}/reverse/${id}`, { method: 'DELETE', credentials: 'include' }); loadReverse(); notify("Deleted", "success"); }); };
     const openFiles = async (id: string) => {
         const res = await fetch(`${API_URL}/reverse/${id}/files`, { credentials: 'include' });
         const json = await res.json();
@@ -2855,7 +3326,15 @@ const ConfigTabs = ({ user, onRestartSetup }: { user: any, onRestartSetup: () =>
             }
         } catch (e) { console.error(e); }
     };
-    const save = async () => { const res = await fetch(`${API_URL}/config`, { method: 'PUT', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(config) }); if (res.ok) notify('Settings saved', 'success'); else notify('Saving failed', 'error'); };
+    const save = async () => {
+        const res = await fetch(`${API_URL}/config`, { method: 'PUT', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(config) });
+        if (res.ok) {
+            notify('Settings saved', 'success');
+            dispatchConfigChanged();
+        } else {
+            notify('Saving failed', 'error');
+        }
+    };
     const testEmail = async () => {
         const targetEmail = user.email;
         if (!targetEmail) return;
@@ -2939,6 +3418,7 @@ const ConfigTabs = ({ user, onRestartSetup }: { user: any, onRestartSetup: () =>
                     [field]: field === 'logoUrl' ? data.logoUrl : data.faviconUrl
                 }));
 
+                dispatchConfigChanged();
                 notify('Image uploaded! Click "Save" to confirm.', 'success');
             } else {
                 const err = await res.json();
@@ -3098,15 +3578,21 @@ const ConfigTabs = ({ user, onRestartSetup }: { user: any, onRestartSetup: () =>
                         </div>
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                             <div>
-                                <label className="block text-neutral-400 text-sm font-bold mb-2">Chunk Size (Upload)</label>
+                                <label className="block text-neutral-400 text-sm font-bold mb-2">
+                                    Chunk Size (Upload)
+                                    <span className="ml-2 text-xs text-neutral-500 font-normal">(Recommended: 10-25 MB for Cloudflare)</span>
+                                </label>
                                 <input
                                     type="number"
                                     className="w-full bg-black border border-neutral-700 rounded-lg p-3 text-white"
                                     value={config.chunkSizeVal ?? ''}
                                     onChange={e => setConfig({ ...config, chunkSizeVal: e.target.value === '' ? '' : parseInt(e.target.value) })}
-                                    onBlur={() => { if (config.chunkSizeVal === '') setConfig({ ...config, chunkSizeVal: 50 }) }}
-                                    placeholder="50"
+                                    onBlur={() => { if (config.chunkSizeVal === '') setConfig({ ...config, chunkSizeVal: 20 }) }}
+                                    placeholder="20"
                                 />
+                                <p className="text-xs text-neutral-500 mt-1">
+                                    Smaller chunks (10-25MB) are more resilient to network issues and Cloudflare tunnel timeouts.
+                                </p>
                             </div>
                             <div>
                                 <label className="block text-neutral-400 text-sm font-bold mb-2">Unit</label>
@@ -3814,7 +4300,9 @@ const SetupWizard = ({ onClose }: { onClose: () => void }) => {
 
 const Dashboard = ({ token, logout }: any) => {
     const [view, setView] = useState('upload');
-    const [config, setConfig] = useState<any>({});
+    const [uploadShowsSuccess, setUploadShowsSuccess] = useState(false);
+    const uploadResetRef = useRef<(() => void) | null>(null);
+    const { config } = useAppConfig();
     const [showSetup, setShowSetup] = useState(false);
     const [is2FALocked, setIs2FALocked] = useState(false);
     const [checking2FA, setChecking2FA] = useState(true);
@@ -3822,13 +4310,10 @@ const Dashboard = ({ token, logout }: any) => {
     const { notify } = useUI();
     // Check of setup nodig is bij laden
     useEffect(() => {
-        if (user && user.email === 'admin@nexoshare.com') {
-            axios.get(`${API_URL}/config`).then(r => {
-                // Check of setupCompleted false is in de config response
-                if (r.data && !r.data.setupCompleted) setShowSetup(true);
-            }).catch(console.error);
+        if (user && user.email === 'admin@nexoshare.com' && config && !config.setupCompleted) {
+            setShowSetup(true);
         }
-    }, [user]);
+    }, [user, config]);
     useTokenExpiration(token, logout);
 
     useEffect(() => {
@@ -3849,21 +4334,6 @@ const Dashboard = ({ token, logout }: any) => {
             }
         };
         check2FA();
-    }, []);
-
-    useEffect(() => {
-        fetch(`${API_URL}/config`).then(r => r.json()).then(data => {
-            setConfig(data);
-            if (data.faviconUrl) {
-                let link = document.querySelector("link[rel~='icon']") as HTMLLinkElement;
-                if (!link) {
-                    link = document.createElement('link');
-                    link.rel = 'icon';
-                    document.getElementsByTagName('head')[0].appendChild(link);
-                }
-                link.href = data.faviconUrl;
-            }
-        });
     }, []);
 
     const handleLogout = () => {
@@ -3913,6 +4383,24 @@ const Dashboard = ({ token, logout }: any) => {
         return () => { window.fetch = originalFetch; };
     }, []);
 
+    const handleUploadSurfaceChange = useCallback((s: { showSuccess: boolean }) => {
+        setUploadShowsSuccess(s.showSuccess);
+    }, []);
+
+    const goToUpload = useCallback(() => {
+        if (is2FALocked) return;
+        if (view === 'upload' && uploadShowsSuccess) {
+            uploadResetRef.current?.();
+        } else {
+            setView('upload');
+        }
+    }, [is2FALocked, view, uploadShowsSuccess]);
+
+    const selectTab = useCallback((tabId: string) => {
+        if (tabId === 'upload') goToUpload();
+        else setView(tabId);
+    }, [goToUpload]);
+
     return (
         <div className="min-h-screen bg-black text-gray-100 font-sans flex flex-col">
             {showSetup && <SetupWizard onClose={() => setShowSetup(false)} />}
@@ -3924,7 +4412,7 @@ const Dashboard = ({ token, logout }: any) => {
                 {/* Logo Container */}
                 <div
                     className={`flex gap-2 md:gap-3 items-center font-bold text-xl md:text-2xl tracking-tight text-white transition z-10 flex-1 justify-center sm:justify-start ${is2FALocked ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer hover:opacity-80'}`}
-                    onClick={() => !is2FALocked && setView('upload')}
+                    onClick={() => !is2FALocked && goToUpload()}
                 >
                     {(config.logoUrl && isValidHttpUrl(config.logoUrl)) ? (
                         <img src={config.logoUrl} className="h-8 md:h-10 rounded" alt="Logo" />
@@ -3940,7 +4428,7 @@ const Dashboard = ({ token, logout }: any) => {
                 {!is2FALocked && (
                     <div className="hidden lg:flex absolute left-1/2 -translate-x-1/2 bg-black/50 p-1.5 rounded-xl border border-neutral-800/50 backdrop-blur-sm z-20">
                         {tabs.map(tab => (
-                            <button key={tab.id} onClick={() => setView(tab.id)} className={`px-6 py-2 rounded-lg text-sm font-bold transition-all duration-300 capitalize ${view === tab.id ? 'bg-neutral-800 text-white shadow-md' : 'text-neutral-400 hover:text-white hover:bg-neutral-900'}`}>{tab.label}</button>
+                            <button key={tab.id} onClick={() => selectTab(tab.id)} className={`px-6 py-2 rounded-lg text-sm font-bold transition-all duration-300 capitalize ${view === tab.id ? 'bg-neutral-800 text-white shadow-md' : 'text-neutral-400 hover:text-white hover:bg-neutral-900'}`}>{tab.label}</button>
                         ))}
                     </div>
                 )}
@@ -3968,7 +4456,7 @@ const Dashboard = ({ token, logout }: any) => {
                             return (
                                 <button
                                     key={tab.id}
-                                    onClick={() => setView(tab.id)}
+                                    onClick={() => selectTab(tab.id)}
                                     className={`flex flex-col items-center p-2 rounded-lg transition-all ${isActive ? 'text-purple-500' : 'text-neutral-500 hover:text-neutral-300'}`}
                                 >
                                     <Icon className={`w-6 h-6 mb-1 ${isActive ? 'fill-purple-500/20' : ''}`} />
@@ -3999,19 +4487,35 @@ const Dashboard = ({ token, logout }: any) => {
                                     forcedSetup={true}
                                     onComplete={() => {
                                         setIs2FALocked(false); // Hef de blokkade op
-                                        setView('upload');     // Ga naar het hoofdscherm
+                                        setView('upload');
                                         notify('Thank you! Your account is now secured.', 'success');
                                     }}
                                 />
                             </div>
                         ) : (
-                            /* NORMALE WEERGAVE */
+                            /* NORMALE WEERGAVE — tabs blijven gemount zodat state (o.a. File handles, uploads) behouden blijft */
                             <>
-                                {view === 'upload' && <UploadView />}
-                                {view === 'shares' && <MySharesView />}
-                                {view === 'config' && user?.is_admin && <ConfigTabs user={user} onRestartSetup={() => setShowSetup(true)} />}
-                                {view === 'reverse' && <ReverseView />}
-                                {view === 'profile' && <ProfileView user={user} config={config} />}
+                                <div className={view === 'upload' ? 'block' : 'hidden'} aria-hidden={view !== 'upload'}>
+                                    <UploadView
+                                        active={view === 'upload'}
+                                        onUploadSurfaceChange={handleUploadSurfaceChange}
+                                        registerReset={uploadResetRef}
+                                    />
+                                </div>
+                                <div className={view === 'shares' ? 'block' : 'hidden'} aria-hidden={view !== 'shares'}>
+                                    <MySharesView active={view === 'shares'} />
+                                </div>
+                                {user?.is_admin && (
+                                    <div className={view === 'config' ? 'block' : 'hidden'} aria-hidden={view !== 'config'}>
+                                        <ConfigTabs user={user} onRestartSetup={() => setShowSetup(true)} />
+                                    </div>
+                                )}
+                                <div className={view === 'reverse' ? 'block' : 'hidden'} aria-hidden={view !== 'reverse'}>
+                                    <ReverseView active={view === 'reverse'} />
+                                </div>
+                                <div className={view === 'profile' ? 'block' : 'hidden'} aria-hidden={view !== 'profile'}>
+                                    <ProfileView user={user} config={config} />
+                                </div>
                             </>
                         )}
                     </>
@@ -4026,66 +4530,49 @@ const Dashboard = ({ token, logout }: any) => {
 const LoginPage = ({ onLogin }: any) => {
     const [email, setEmail] = useState('');
     const [password, setPassword] = useState('');
-    const [config, setConfig] = useState<any>({});
     const [loadingSSO, setLoadingSSO] = useState(false);
 
     const [initializing, setInitializing] = useState(true);
 
     const { notify } = useUI();
+    const { config, loading: cfgLoading } = useAppConfig();
 
     useEffect(() => {
-        fetch(`${API_URL}/config`).then(r => r.json()).then(data => {
-            setConfig(data);
-
-            if (data.faviconUrl) {
-                let link = document.querySelector("link[rel~='icon']") as HTMLLinkElement;
-                if (!link) {
-                    link = document.createElement('link');
-                    link.rel = 'icon';
-                    document.getElementsByTagName('head')[0].appendChild(link);
-                }
-                link.href = data.faviconUrl;
-            }
-
-            const params = new URLSearchParams(window.location.search);
-            const noRedirect = params.get('noredirect');
-            const nonce = params.get('nonce');
-
-            if (data.ssoEnabled && data.ssoAutoRedirect && !noRedirect && !nonce) {
-                setLoadingSSO(true);
-                window.location.href = `${API_URL}/auth/sso`;
-                return;
-            } else {
-                setInitializing(false);
-            }
-        }).catch(() => {
-            setInitializing(false);
-        });
-
-        const params = new URLSearchParams(window.location.search);
-        const nonce = params.get('nonce');
-        if (nonce) {
-            fetch(`${API_URL}/auth/sso-exchange`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ nonce })
-            })
-                .then(r => r.json())
-                .then(data => {
-                    if (data.token && data.user) {
-                        onLogin(data.user);
-                        window.history.replaceState({}, document.title, window.location.pathname);
-                    } else {
-                        notify('SSO login failed', 'error');
-                        setInitializing(false);
-                    }
-                })
-                .catch(() => {
+        const nonce = new URLSearchParams(window.location.search).get('nonce');
+        if (!nonce) return;
+        fetch(`${API_URL}/auth/sso-exchange`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ nonce })
+        })
+            .then(r => r.json())
+            .then(data => {
+                if (data.token && data.user) {
+                    onLogin(data.user);
+                    window.history.replaceState({}, document.title, window.location.pathname);
+                } else {
                     notify('SSO login failed', 'error');
                     setInitializing(false);
-                });
+                }
+            })
+            .catch(() => {
+                notify('SSO login failed', 'error');
+                setInitializing(false);
+            });
+    }, [onLogin, notify]);
+
+    useEffect(() => {
+        if (cfgLoading) return;
+        const params = new URLSearchParams(window.location.search);
+        if (params.get('nonce')) return;
+        const noRedirect = params.get('noredirect');
+        if (config.ssoEnabled && config.ssoAutoRedirect && !noRedirect) {
+            setLoadingSSO(true);
+            window.location.href = `${API_URL}/auth/sso`;
+            return;
         }
-    }, []);
+        setInitializing(false);
+    }, [cfgLoading, config]);
 
     const [twoFactorRequired, setTwoFactorRequired] = useState(false);
     const [twoFactorCode, setTwoFactorCode] = useState('');
@@ -4354,6 +4841,7 @@ const GuestUploadPage = () => {
     const [password, setPassword] = useState('');
     const [unlocked, setUnlocked] = useState(false);
     const { notify, preview } = useUI();
+    const { config: guestCfg } = useAppConfig();
     const [files, setFiles] = useState<UploadItem[]>([]);
     const [uploading, setUploading] = useState(false);
     const [success, setSuccess] = useState(false);
@@ -4377,14 +4865,6 @@ const GuestUploadPage = () => {
                 }
             })
             .catch(() => setError('Network error'));
-
-        fetch(`${API_URL}/config`).then(r => r.json()).then(data => {
-            if (data.faviconUrl) {
-                let link = document.querySelector("link[rel~='icon']") as HTMLLinkElement;
-                if (!link) { link = document.createElement('link'); link.rel = 'icon'; document.getElementsByTagName('head')[0].appendChild(link); }
-                link.href = data.faviconUrl;
-            }
-        });
     }, [id]);
 
     const verify = async () => { const res = await fetch(`${API_URL}/public/reverse/${id}/verify`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password }) }); const json = await res.json(); if (json.valid) setUnlocked(true); else notify('Wrong password', "error"); };
@@ -4425,77 +4905,153 @@ const GuestUploadPage = () => {
         } catch (err: any) { if (err.name !== 'AbortError') folderInputRef.current?.click(); }
     };
 
+    // Warn before leaving page during upload
+    useEffect(() => {
+        const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+            if ((window as any).__uploading) {
+                e.preventDefault();
+                e.returnValue = 'Upload in progress. Are you sure you want to leave?';
+                return e.returnValue;
+            }
+        };
+        window.addEventListener('beforeunload', handleBeforeUnload);
+        return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+    }, []);
+
     const handleUpload = async () => {
         setUploading(true);
         setProgress(0);
+        (window as any).__uploading = true;
+
 
         try {
-            const configRes = await fetch(`${API_URL}/config`);
-            const config = await configRes.json();
+            const cfg = guestCfg;
             const k = 1024;
             const sizeMap: any = { 'KB': k, 'MB': k * k, 'GB': k * k * k, 'TB': k * k * k * k };
-            const chunkSizeVal = config.chunkSizeVal || 50;
-            const chunkSizeUnit = config.chunkSizeUnit || 'MB';
+            const chunkSizeVal = (cfg?.chunkSizeVal as number) || 20;
+            const chunkSizeUnit = (cfg?.chunkSizeUnit as string) || 'MB';
             const CHUNK_SIZE = chunkSizeVal * (sizeMap[chunkSizeUnit] || sizeMap['MB']);
 
             // Init call
             const initRes = await axios.post(`${API_URL}/public/reverse/${id}/init`);
             if (!initRes.data.success) throw new Error('Init failed');
 
-            const uploadableFiles = files.filter(f => !f.isDirectory && f.file);
+            const uploadableFiles = files.filter(f => !f.isDirectory && f.file && !f.cancelled);
             const uploadedFilesMeta = [];
             const totalUploadSize = uploadableFiles.reduce((acc, f) => acc + f.size, 0);
             let uploadedBytes = 0;
 
+            // Abort controller for guest uploads
+            const abortController = new AbortController();
+            (window as any).__uploadAbortController = abortController;
+
+            const uploadChunk = async (file: File, fileId: string, chunkIndex: number, _totalChunks: number): Promise<boolean> => {
+                const start = chunkIndex * CHUNK_SIZE;
+                const end = Math.min(start + CHUNK_SIZE, file.size);
+                const chunk = file.slice(start, end);
+                
+                const chunkHash = await computeChunkHash(chunk);
+                
+                const fd = new FormData();
+                fd.append('chunk', chunk);
+                fd.append('chunkIndex', chunkIndex.toString());
+                fd.append('fileName', file.name);
+                fd.append('fileId', fileId);
+                fd.append('chunkHash', chunkHash);
+
+                let attempts = 0;
+                const maxAttempts = 10;
+                while (attempts < maxAttempts) {
+                    try {
+                        await axios.post(`${API_URL}/public/reverse/${id}/chunk`, fd, {
+                            headers: { 'X-Chunk-Size': CHUNK_SIZE.toString() },
+                            signal: abortController.signal
+                        });
+                        return true;
+                    } catch (err: any) {
+                        attempts++;
+                        if (err.name === 'AbortError' || err.message?.includes('cancel')) return false;
+                        if (err.response?.status === 400 || err.response?.status === 413) throw err;
+                        if (attempts >= maxAttempts) throw new Error('Upload failed');
+                        await new Promise(res => setTimeout(res, getBackoffDelay(attempts)));
+                    }
+                }
+                return false;
+            };
+
+            const MAX_PARALLEL = 3;
+            
             for (const item of uploadableFiles) {
+                // Check if cancelled
+                const currentFileState = files.find(f => f.id === item.id);
+                if (!currentFileState || currentFileState.cancelled) continue;
+                
                 const file = item.file as File;
                 const fileId = generateUUID();
                 const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
 
-                for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
-                    const start = chunkIndex * CHUNK_SIZE;
-                    const end = Math.min(start + CHUNK_SIZE, file.size);
-                    const chunk = file.slice(start, end);
-
-                    const fd = new FormData();
-                    fd.append('chunk', chunk);
-                    fd.append('chunkIndex', chunkIndex.toString());
-                    fd.append('fileName', file.name);
-                    fd.append('fileId', fileId);
-
-                    // --- RETRY LOGICA (AUTO-HERSTEL) ---
-                    let attempts = 0;
-                    const maxAttempts = 10;
-                    let success = false;
-
-                    while (!success && attempts < maxAttempts) {
-                        try {
-                            await axios.post(`${API_URL}/public/reverse/${id}/chunk`, fd);
-                            success = true;
-                        } catch (err) {
-                            attempts++;
-                            console.warn(`Chunk ${chunkIndex} failed, retrying...`);
-                            if (attempts >= maxAttempts) throw new Error(`Upload failed.`);
-                            await new Promise(res => setTimeout(res, 1000 * attempts));
-                        }
-                    }
-
-                    uploadedBytes += chunk.size;
-                    setProgress(Math.round((uploadedBytes * 100) / totalUploadSize));
+                if (totalChunks > 0) {
+                    const ok0 = await uploadChunk(file, fileId, 0, totalChunks);
+                    if (!ok0) throw new Error('cancelled');
+                    uploadedBytes += Math.min(CHUNK_SIZE, file.size);
+                    setProgress(Math.min(Math.round((uploadedBytes * 100) / totalUploadSize), 99));
+                    setFiles(prev => prev.map(f =>
+                        f.id === item.id
+                            ? { ...f, uploadProgress: Math.min(Math.round((1 / totalChunks) * 100), 99) }
+                            : f
+                    ));
                 }
-                uploadedFilesMeta.push({ fileName: file.name, originalName: item.path, fileId: fileId, size: file.size, mimeType: file.type });
+                for (let batchStart = 1; batchStart < totalChunks; batchStart += MAX_PARALLEL) {
+                    const batchEnd = Math.min(batchStart + MAX_PARALLEL, totalChunks);
+                    const promises = [];
+                    for (let chunkIndex = batchStart; chunkIndex < batchEnd; chunkIndex++) {
+                        promises.push(uploadChunk(file, fileId, chunkIndex, totalChunks));
+                    }
+                    const results = await Promise.all(promises);
+                    if (results.includes(false)) {
+                        throw new Error('cancelled');
+                    }
+                    uploadedBytes += (batchEnd - batchStart) * CHUNK_SIZE;
+                    setProgress(Math.min(Math.round((uploadedBytes * 100) / totalUploadSize), 99));
+                    
+                    setFiles(prev => prev.map(f => 
+                        f.id === item.id 
+                            ? { ...f, uploadProgress: Math.min(Math.round(((batchEnd) / totalChunks) * 100), 99) }
+                            : f
+                    ));
+                }
+                
+                const fileState = files.find(f => f.id === item.id);
+                if (!fileState?.cancelled) {
+                    uploadedFilesMeta.push({ fileName: file.name, originalName: item.path, fileId: fileId, size: file.size, mimeType: file.type });
+                }
             }
 
             setProgress(99);
+            
+            if (uploadedFilesMeta.length === 0) {
+                setFiles([]);
+                notify('Upload cancelled', 'info');
+                return;
+            }
+            
             await axios.post(`${API_URL}/public/reverse/${id}/finalize`, { files: uploadedFilesMeta });
             setSuccess(true);
 
         } catch (e: any) {
+            if (e.name === 'AbortError' || e.message?.includes('cancel')) {
+                setFiles(prev => prev.map(f => ({ ...f, cancelled: false, uploadProgress: 0 })));
+                notify('Upload cancelled', 'info');
+                return;
+            }
             const msg = e.response?.data?.error || e.message || 'Error during upload';
             notify(msg, "error");
         } finally {
+            delete (window as any).__uploadAbortController;
+            delete (window as any).__uploading;
             setUploading(false);
             setProgress(0);
+            setFiles(prev => prev.map(f => ({ ...f, cancelled: false, uploadProgress: 0 })));
         }
     };
 
@@ -4576,14 +5132,17 @@ const GuestUploadPage = () => {
                         }} />
 
                         <div
-                            className="bg-neutral-900 border-2 border-dashed border-neutral-800 rounded-2xl md:p-10 flex flex-col items-center justify-center min-h-[250px] md:min-h-[30px] hover:border-purple-500 hover:bg-neutral-900/80 transition-all duration-300 group relative overflow-hidden"
+                            className="isolate group relative flex flex-col items-center justify-center overflow-hidden rounded-2xl bg-neutral-900 md:p-10 min-h-[250px] md:min-h-[300px] outline-none focus-visible:outline-none [transform:translateZ(0)] [backface-visibility:hidden]"
                             onDragOver={e => e.preventDefault()}
                             onDrop={handleDrop}
                         >
-                            <div className="absolute inset-0 z-0 cursor-pointer" onClick={() => fileInputRef.current?.click()} />
+                            <div className="pointer-events-none absolute inset-0 z-0 rounded-2xl bg-purple-500/[0.06] opacity-0 transition-opacity duration-300 ease-out group-hover:opacity-100" aria-hidden />
+                            <div className="pointer-events-none absolute inset-0 z-[1] rounded-2xl border-2 border-dashed border-neutral-800" aria-hidden />
+                            <div className="pointer-events-none absolute inset-0 z-[2] rounded-2xl border-2 border-dashed border-purple-500 opacity-0 transition-opacity duration-300 ease-out group-hover:opacity-100" aria-hidden />
+                            <div className="absolute inset-0 z-[3] cursor-pointer" onClick={() => fileInputRef.current?.click()} />
 
                             <div className="relative z-10 text-center pointer-events-none mb-4">
-                                <div className="w-16 h-16 bg-gradient-to-tr from-purple-600 to-blue-600 rounded-full flex items-center justify-center mx-auto mb-4 shadow-xl group-hover:scale-110 transition-transform duration-300">
+                                <div className="w-16 h-16 bg-gradient-to-tr from-purple-600 to-blue-600 rounded-full flex items-center justify-center mx-auto mb-4 shadow-xl transition-transform duration-300 group-hover:scale-110">
                                     <CloudUpload className="text-white w-8 h-8" />
                                 </div>
                                 <h3 className="text-xl font-bold text-white mb-2">Drag & Drop files</h3>
@@ -4616,7 +5175,7 @@ const GuestUploadPage = () => {
                             <div className="mt-2 bg-neutral-900 rounded-2xl border border-neutral-800 overflow-hidden shadow-xl" style={{ "--indent-step": "24px" } as React.CSSProperties}>
                                 <style>{`@media (max-width: 768px) { [style*="--indent-step"] { --indent-step: 12px !important; } }`}</style>
                                 <div className="max-h-[300px] overflow-y-auto">
-                                    {files.map((item) => {
+                                    {files.filter(f => !f.cancelled || uploading).map((item) => {
                                         const segments = item.path.split('/');
                                         const depth = Math.max(0, segments.length - 1);
                                         // Using calc with var for responsive indent
@@ -4646,7 +5205,10 @@ const GuestUploadPage = () => {
                                                             <Eye className="w-4 h-4 md:w-5 md:h-5" />
                                                         </button>
                                                     )}
-                                                    <button onClick={(e) => { e.stopPropagation(); setFiles(files.filter(x => x.id !== item.id && !x.path.startsWith(item.path + '/'))) }} className="text-neutral-500 hover:text-red-400 p-2 transition flex-shrink-0"><X className="w-4 h-4 md:w-5 md:h-5" /></button>
+                                                    <button onClick={(e) => {
+                                                        e.stopPropagation();
+                                                        setFiles(prev => prev.filter(x => x.id !== item.id && !x.path.startsWith(item.path + '/')));
+                                                    }} className="text-neutral-500 hover:text-red-400 p-2 transition flex-shrink-0"><X className="w-4 h-4 md:w-5 md:h-5" /></button>
                                                 </div>
                                             </div>
                                         );
@@ -4806,14 +5368,6 @@ const DownloadPage = () => {
                 }
             })
             .catch(() => setError('Network error'));
-
-        fetch(`${API_URL}/config`).then(r => r.json()).then(fetchedConfig => {
-            if (fetchedConfig.faviconUrl) {
-                let link = document.querySelector("link[rel~='icon']") as HTMLLinkElement;
-                if (!link) { link = document.createElement('link'); link.rel = 'icon'; document.getElementsByTagName('head')[0].appendChild(link); }
-                link.href = fetchedConfig.faviconUrl;
-            }
-        });
     }, [id]);
 
     const verify = async () => {
@@ -4966,6 +5520,7 @@ function App() {
 
     return (
         <BrowserRouter>
+            <AppConfigProvider>
             <UIProvider>
                 <Routes>
                     <Route path="/s/:id" element={<DownloadPage />} />
@@ -4975,6 +5530,7 @@ function App() {
                     <Route path="/*" element={user ? <Dashboard token={token} logout={logout} /> : <Navigate to="/login" />} />
                 </Routes>
             </UIProvider>
+            </AppConfigProvider>
         </BrowserRouter>
     );
 }

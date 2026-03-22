@@ -85,7 +85,6 @@ const app = express();
 app.disable('x-powered-by'); // Security: Hide Express
 const PORT = parseInt(process.env.PORT || '3001');
 const UPLOAD_DIR = path.resolve(process.env.UPLOAD_DIR || './uploads');
-const pendingUploads = new Map<string, number>(); // Track pending bytes per share ID
 const TEMP_DIR = path.join(UPLOAD_DIR, 'temp');
 const SYSTEM_DIR = path.join(UPLOAD_DIR, 'system'); // Veilige map voor systeem assets
 
@@ -404,7 +403,7 @@ app.use(cors({
     },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization']
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Chunk-Size', 'X-Preview-Stream', 'Accept']
 }));
 // --- SECURITY HEADERS MIDDLEWARE ---
 app.use((req, res, next) => {
@@ -470,7 +469,9 @@ app.use((req, res, next) => {
 
     next();
 });
-app.use(express.json());
+app.use(express.json({ limit: '2mb' }));
+// Publiek internet: JSON-body limiet tegen grote JSON-DoS; CORS staat requests zonder Origin toe (o.a. mobile/native tools).
+// Overweeg voor strikt alleen-web: origin null/undefined weigeren, en trust proxy alleen als je reverse proxy correct configureert.
 
 // --- Security: Simple In-Memory Rate Limiter ---
 const createRateLimiter = (windowMs: number, max: number, message: string) => {
@@ -496,6 +497,9 @@ const createRateLimiter = (windowMs: number, max: number, message: string) => {
     process.on('SIGINT', () => clearInterval(cleanupInterval)); // Cleanup interval gelijk aan window
 
     return (req: Request, res: Response, next: NextFunction) => {
+        // Skip rate limiting for HEAD requests (used for PDF preview)
+        if (req.method === 'HEAD') return next();
+        
         const ip = getClientIP(req);
         const now = Date.now();
 
@@ -612,70 +616,27 @@ const safeUnlink = async (filePath: string) => {
     }
 };
 
-// Consolidated Merge Logic
-const mergeChunks = async (partPrefix: string, totalChunks: number, finalPath: string) => {
-    const { createReadStream, createWriteStream } = require('fs');
+/** Declared total bytes for this upload session (POST /shares/init). */
+const uploadSessionBudget = new Map<string, number>();
+/** Cumulative raw bytes received in chunk POST bodies for this share. */
+const uploadSessionBytesUsed = new Map<string, number>();
 
-    // Security: Validate strict path containment
-    const resolvedFinal = path.resolve(finalPath);
-    const allowUpload = path.resolve(UPLOAD_DIR);
-    const allowTemp = path.resolve(TEMP_DIR);
+const clearUploadSessionKeys = (shareId: string) => {
+    uploadSessionBudget.delete(shareId);
+    uploadSessionBytesUsed.delete(shareId);
+};
 
-    if (!resolvedFinal.startsWith(allowUpload) && !resolvedFinal.startsWith(allowTemp)) {
-        throw new Error('Security Violation: Invalid merge target path');
-    }
-
-    const dest = createWriteStream(resolvedFinal);
-    let errorOccurred = false;
-
-    for (let i = 0; i < totalChunks; i++) {
-        if (errorOccurred) break;
-
-        // Construct part path using the safe prefix provided by caller
-        const partPath = `${partPrefix}.part_${i}`;
-        const resolvedPart = path.resolve(partPath);
-
-        // Security: Ensure we are only reading from TEMP_DIR
-        if (!resolvedPart.startsWith(allowTemp)) {
-            dest.end();
-            throw new Error('Security Violation: Invalid part path');
+/** Verwijdert tijdelijke `shareId_*_*.part` bestanden in TEMP_DIR. */
+const unlinkTempPartFilesForShare = async (shareId: string) => {
+    try {
+        const dir = await fs.readdir(TEMP_DIR);
+        const prefix = `${shareId}_`;
+        for (const name of dir) {
+            if (name.startsWith(prefix) && name.endsWith('.part')) {
+                await safeUnlink(path.join(TEMP_DIR, name));
+            }
         }
-
-        try {
-            await fs.access(resolvedPart);
-        } catch {
-            dest.end();
-            throw new Error(`Missing part ${i}. Upload incomplete.`);
-        }
-
-        await new Promise((resolve, reject) => {
-            const source = createReadStream(resolvedPart);
-            source.on('error', (err: any) => {
-                errorOccurred = true;
-                reject(err);
-            });
-            source.pipe(dest, { end: false });
-            source.on('end', resolve);
-        });
-
-        await safeUnlink(resolvedPart);
-    }
-
-    dest.end();
-
-    await new Promise((resolve, reject) => {
-        dest.on('finish', resolve);
-        dest.on('error', (err: any) => {
-            errorOccurred = true;
-            reject(err);
-        });
-    });
-
-    if (errorOccurred) {
-        // Cleanup destination if failed
-        await safeUnlink(finalPath);
-        throw new Error('Merge failed');
-    }
+    } catch { /* noop */ }
 };
 
 // --- Global Cache Variables ---
@@ -880,12 +841,13 @@ const isStrongPassword = (password: string): { valid: boolean; error?: string } 
     return { valid: true };
 };
 
-async function sendEmail(to: string, subject: string, rawMessage: string, ctaLink?: string, ctaText?: string) {
+/** Returns true only when mail was actually handed to SMTP (not skipped: no SMTP, invalid address). */
+async function sendEmail(to: string, subject: string, rawMessage: string, ctaLink?: string, ctaText?: string): Promise<boolean> {
     const config = await getConfig();
-    if (!config.smtpHost) return;
+    if (!config.smtpHost) return false;
     if (!isValidEmail(to)) {
         console.error(`Blocked email send to invalid address: ${to}`);
-        return;
+        return false;
     }
 
     const safeMessage = rawMessage;
@@ -921,6 +883,7 @@ async function sendEmail(to: string, subject: string, rawMessage: string, ctaLin
         // Gebruik smtpFrom als die is ingesteld, anders smtpUser
         const fromEmail = config.smtpFrom || config.smtpUser;
         await transporter.sendMail({ from: `"${safeHeaderAppName}" <${fromEmail}>`, to, subject, html });
+        return true;
     } catch (e: any) {
         // Log the SPECIFIC error to the server console so you can see it
         console.error("❌ SMTP SEND ERROR:", e.message);
@@ -2587,6 +2550,23 @@ apiRouter.post('/shares/init', authenticateToken, uploadLimiter, handleUploadId,
         const passwordHash = password ? await Bun.password.hash(password) : null;
         const config = await getConfig();
 
+        const maxShareBytes = getBytes(config.maxSizeVal || 10, config.maxSizeUnit || 'GB');
+        const rawTotal = (authReq.body as any).totalUploadBytes;
+        let totalUploadBytes: number;
+        if (rawTotal === undefined || rawTotal === null || rawTotal === '') {
+            totalUploadBytes = maxShareBytes; // legacy clients: geen sessie-totaal; server gebruikt max
+        } else {
+            totalUploadBytes = typeof rawTotal === 'number' && Number.isFinite(rawTotal)
+                ? rawTotal
+                : parseInt(String(rawTotal), 10);
+            if (!Number.isFinite(totalUploadBytes) || totalUploadBytes < 0) {
+                return res.status(400).json({ error: 'Invalid totalUploadBytes' });
+            }
+        }
+        if (totalUploadBytes > maxShareBytes) {
+            return res.status(413).json({ error: 'Total upload exceeds maximum share size.' });
+        }
+
         let expiresAt = null;
 
         // 1. Definiëer unit (standaard uit config als niet meegegeven)
@@ -2634,6 +2614,10 @@ apiRouter.post('/shares/init', authenticateToken, uploadLimiter, handleUploadId,
         // Maak alvast de map aan
         const shareDir = path.join(UPLOAD_DIR, shareId);
         await fs.mkdir(shareDir, { recursive: true });
+
+        clearUploadSessionKeys(shareId);
+        uploadSessionBudget.set(shareId, totalUploadBytes);
+        uploadSessionBytesUsed.set(shareId, 0);
 
         res.json({ success: true, shareId });
     } catch (e: any) {
@@ -2712,7 +2696,7 @@ apiRouter.post('/shares/:id/chunk', authenticateToken, uploadLimiter, chunkUploa
     // Security: Validate ID format before touching FS
     if (!isValidId(id)) return res.status(400).json({ error: 'Invalid Share ID format' });
 
-    const { fileName, chunkIndex, fileId } = req.body;
+    const { fileName, chunkIndex, fileId, chunkHash } = req.body;
     if (!isValidId(fileId)) return res.status(400).json({ error: 'Invalid File ID format' });
 
     if (!req.file) return res.status(400).json({ error: 'No data' });
@@ -2725,27 +2709,117 @@ apiRouter.post('/shares/:id/chunk', authenticateToken, uploadLimiter, chunkUploa
         const config = await getConfig();
         const maxBytes = getBytes(config.maxSizeVal || 10, config.maxSizeUnit || 'GB');
 
-        // Incremental Append Logic
-        const chunkIdx = parseInt(chunkIndex);
+        const chunkIdx = parseInt(String(chunkIndex), 10);
+        if (!Number.isFinite(chunkIdx) || chunkIdx < 0) {
+            await safeUnlink(req.file.path);
+            return res.status(400).json({ error: 'Invalid chunk index' });
+        }
 
-        // Check limiet alleen bij eerste chunk (bespaart DB calls)
-        if (chunkIdx === 0) {
+        const chunkData = await fs.readFile(req.file.path);
+        const chunkLen = chunkData.length;
+
+        const chunkHashDir = path.join(TEMP_DIR, 'chunks');
+
+        if (chunkHash) {
+            if (!/^[a-fA-F0-9]{64}$/.test(chunkHash)) {
+                await safeUnlink(req.file.path);
+                return res.status(400).json({ error: 'Invalid chunk hash format' });
+            }
+
+            const crypto = await import('crypto');
+            const hash = crypto.createHash('sha256').update(chunkData).digest('hex');
+
+            if (hash !== chunkHash.toLowerCase()) {
+                await safeUnlink(req.file.path);
+                return res.status(400).json({ error: 'Chunk hash mismatch - data corruption detected' });
+            }
+
+            await fs.mkdir(chunkHashDir, { recursive: true }).catch(() => { });
+            const hashStoragePath = path.join(chunkHashDir, chunkHash);
+            try {
+                await fs.copyFile(req.file.path, hashStoragePath);
+            } catch {
+                // File already exists (duplicate chunk from different file)
+            }
+        }
+
+        const sizeMap: any = { 'KB': 1024, 'MB': 1024 * 1024, 'GB': 1024 * 1024 * 1024, 'TB': 1024 * 1024 * 1024 * 1024 };
+        const defaultChunkSize = (config.chunkSizeVal || 20) * (sizeMap[config.chunkSizeUnit || 'MB'] || sizeMap['MB']);
+        const chunkSize = parseInt(req.headers['x-chunk-size'] as string) || defaultChunkSize;
+
+        const budget = uploadSessionBudget.get(id);
+        if (budget !== undefined) {
+            const used = uploadSessionBytesUsed.get(id) || 0;
+            if (used + chunkLen > budget) {
+                await safeUnlink(req.file.path);
+                return res.status(413).json({ error: 'Upload exceeds declared session size.' });
+            }
+        } else if (chunkIdx === 0) {
             const usageRes = await pool.query('SELECT COALESCE(SUM(size), 0) as total FROM files WHERE share_id = $1', [id]);
             const currentTotal = parseInt(usageRes.rows[0].total);
-            if (currentTotal + req.file.size > maxBytes) {
+            if (currentTotal + chunkLen > maxBytes) {
                 await safeUnlink(req.file.path);
                 return res.status(413).json({ error: `Share limit exceeded.` });
             }
-            // Start fresh for chunk 0
-            await safeUnlink(partFilePath);
         }
 
-        // Append chunk to the single .part file
-        const chunkData = await fs.readFile(req.file.path);
-        await fs.appendFile(partFilePath, chunkData);
+        if (chunkIdx > 0) {
+            try {
+                await fs.access(partFilePath);
+            } catch {
+                await safeUnlink(req.file.path);
+                return res.status(400).json({ error: 'Upload chunk 0 before later chunks for each file.' });
+            }
+        }
+
+        const totalFileSizeRaw = (req.body as any).totalFileSize;
+        const totalFileSize = typeof totalFileSizeRaw === 'number' && Number.isFinite(totalFileSizeRaw)
+            ? totalFileSizeRaw
+            : parseInt(String(totalFileSizeRaw ?? ''), 10);
+
+        if (chunkIdx === 0) {
+            await safeUnlink(partFilePath);
+            if (Number.isFinite(totalFileSize) && totalFileSize > 0 && totalFileSize <= maxBytes) {
+                await fs.writeFile(partFilePath, Buffer.alloc(0));
+                await fs.truncate(partFilePath, totalFileSize);
+            }
+        }
+
+        const offset = chunkIdx * chunkSize;
+        
+        try {
+            // Use write with offset for parallel-safe writes
+            const { createWriteStream } = await import('fs');
+            await new Promise<void>((resolve, reject) => {
+                const stream = createWriteStream(partFilePath, { 
+                    flags: 'r+',
+                    start: offset 
+                });
+                stream.on('error', reject);
+                stream.on('finish', resolve);
+                stream.end(chunkData);
+            });
+        } catch {
+            // File might not exist yet, create with offset
+            const { createWriteStream } = await import('fs');
+            await new Promise<void>((resolve, reject) => {
+                const stream = createWriteStream(partFilePath, { 
+                    flags: 'w',
+                    start: offset 
+                });
+                stream.on('error', reject);
+                stream.on('finish', resolve);
+                stream.end(chunkData);
+            });
+        }
+
         await safeUnlink(req.file.path);
 
-        res.json({ success: true });
+        if (budget !== undefined) {
+            uploadSessionBytesUsed.set(id, (uploadSessionBytesUsed.get(id) || 0) + chunkLen);
+        }
+
+        res.json({ success: true, chunkIndex: chunkIdx });
     } catch (e) {
         if (req.file) await safeUnlink(req.file.path);
         console.error('Chunk error:', e);
@@ -2762,12 +2836,23 @@ apiRouter.post('/shares/:id/finalize', authenticateToken, uploadLimiter, async (
 
     const { files } = req.body;
     if (!Array.isArray(files)) return res.status(400).json({ error: 'Invalid files data' });
+    
+    // If no files (all cancelled), delete the share and return
+    if (files.length === 0) {
+        clearUploadSessionKeys(id);
+        await unlinkTempPartFilesForShare(id);
+        await pool.query('DELETE FROM shares WHERE id = $1', [id]);
+        return res.json({ success: true, empty: true, shareUrl: null });
+    }
+    
     for (const f of files) {
         if (!isValidId(f.fileId)) return res.status(400).json({ error: 'Invalid File ID format' });
     }
     const authReq = req as AuthRequest;
 
     const client = await pool.connect();
+    const movedStoragePaths: string[] = [];
+    let transactionCommitted = false;
 
     try {
         const config = await getConfig();
@@ -2776,6 +2861,12 @@ apiRouter.post('/shares/:id/finalize', authenticateToken, uploadLimiter, async (
         const checkOwner = await client.query('SELECT user_id FROM shares WHERE id = $1', [id]);
         if (checkOwner.rows.length === 0) throw new Error('Share not found');
         if (checkOwner.rows[0].user_id !== authReq.user!.id) throw new Error('Access denied');
+
+        const declaredTotal = files.reduce((acc: number, f: any) => acc + (Number(f.size) || 0), 0);
+        const sessionBudget = uploadSessionBudget.get(id);
+        if (sessionBudget !== undefined && declaredTotal > sessionBudget) {
+            throw new Error('Declared file sizes exceed upload session budget.');
+        }
 
         await client.query('BEGIN');
 
@@ -2790,10 +2881,13 @@ apiRouter.post('/shares/:id/finalize', authenticateToken, uploadLimiter, async (
             try {
                 // Rename direct naar final destination (Instant!)
                 await fs.rename(partPath, finalPath);
-            } catch (e) {
+                movedStoragePaths.push(finalPath);
+            } catch (e: any) {
                 console.error(`Finalize error for`, f.fileName, ':', e);
-                // Fallback check voor legacy/fout
-                throw new Error(`Upload failed processing ${f.originalName}`);
+                if (e.code === 'ENOENT') {
+                    throw new Error(`Upload incomplete - chunk(s) missing for ${f.originalName}`);
+                }
+                throw new Error(`Upload failed processing ${f.originalName}: ${e.message}`);
             }
 
 
@@ -2847,7 +2941,12 @@ apiRouter.post('/shares/:id/finalize', authenticateToken, uploadLimiter, async (
         const share = shareRes.rows[0];
 
         await client.query('COMMIT');
+        transactionCommitted = true;
 
+        clearUploadSessionKeys(id);
+        await unlinkTempPartFilesForShare(id);
+
+        let recipientsNotified = false;
         // Emails
         if (share.recipients) {
             try {
@@ -2856,20 +2955,31 @@ apiRouter.post('/shares/:id/finalize', authenticateToken, uploadLimiter, async (
                 const url = `${baseUrl}/s/${id}`;
                 for (const email of list) {
                     await pool.query(`INSERT INTO contacts (user_id, email) VALUES ($1, $2) ON CONFLICT (user_id, email) DO NOTHING`, [authReq.user!.id, email]);
-                    await sendEmail(email, 'Files received',
+                    const sent = await sendEmail(email, 'Files received',
                         `<p><strong>${escapeHtml(authReq.user!.email)}</strong> shared files with you.</p>
                         <div class="message-box" style="background: #f3f4f6; padding: 15px; border-radius: 8px; margin: 20px 0; color: #4b5563;">
                         ${share.message ? escapeHtml(share.message).replace(/\n/g, '<br>') : 'No message was added.'}
                         </div>`, url, 'Download Files');
+                    if (sent) recipientsNotified = true;
                 }
             } catch (mailErr) { console.error("Email failed:", mailErr); }
         }
 
         await logAudit(authReq.user!.id, 'share_created', 'share', id, req, { fileCount: files.length });
-        res.json({ success: true, shareUrl: `${config.appUrl || 'http://localhost:5173'}/s/${id}` });
+        res.json({
+            success: true,
+            shareUrl: `${config.appUrl || 'http://localhost:5173'}/s/${id}`,
+            recipientsNotified
+        });
 
     } catch (e: any) {
-        await client.query('ROLLBACK');
+        try { await client.query('ROLLBACK'); } catch { /* noop */ }
+        if (!transactionCommitted) {
+            for (const p of movedStoragePaths) {
+                await safeUnlink(p);
+            }
+            await unlinkTempPartFilesForShare(id);
+        }
         console.error('Finalize error:', e);
         const status = e.message.includes('Virus') ? 400 : 500;
         res.status(status).json({ error: e.message || 'Finalize failed' });
@@ -2902,6 +3012,12 @@ apiRouter.put('/shares/:id', authenticateToken, uploadLimiter, checkUploadLimits
             const check = await client.query('SELECT id FROM shares WHERE id = $1', [customSlug]);
             if (check.rows.length > 0) return res.status(409).json({ error: 'Link is already in use' });
             newId = customSlug;
+        }
+
+        if (newId !== currentId && uploadSessionBudget.has(currentId)) {
+            return res.status(409).json({
+                error: 'Cannot change the share link while a file upload is still in progress for this share. Wait until the upload finishes.'
+            });
         }
 
         const updates = [];
@@ -3075,7 +3191,10 @@ apiRouter.post('/shares/:id/resend', authenticateToken, async (req, res) => {
 // STAGE: Bestanden samenvoegen in TEMP maar nog niet aan share koppelen (preview mogelijk maken)
 apiRouter.post('/shares/:id/stage', authenticateToken, uploadLimiter, async (req, res) => {
     const { id } = req.params;
-    const { files } = req.body; // Array of {fileName, fileId, size, totalChunks}
+    const { files } = req.body; // Array of {fileName, fileId, size, mimeType}
+    if (!Array.isArray(files) || files.length === 0) {
+        return res.status(400).json({ error: 'Invalid or empty files data' });
+    }
 
     // We gebruiken hier GEEN DB transactie of cleaning, want het is temporary.
     // De 'cleanup' job verwijdert oude meuk uit temp wel.
@@ -3084,11 +3203,6 @@ apiRouter.post('/shares/:id/stage', authenticateToken, uploadLimiter, async (req
 
     try {
         const config = await getConfig();
-        const k = 1024;
-        const sizeMap: any = { 'KB': k, 'MB': k * k, 'GB': k * k * k, 'TB': k * k * k * k };
-        const chunkSizeVal = config.chunkSizeVal || 50;
-        const chunkSizeUnit = config.chunkSizeUnit || 'MB';
-        const CHUNK_SIZE = chunkSizeVal * (sizeMap[chunkSizeUnit] || sizeMap['MB']);
 
         for (const f of files) {
             if (!isValidId(f.fileId)) {
@@ -3104,12 +3218,19 @@ apiRouter.post('/shares/:id/stage', authenticateToken, uploadLimiter, async (req
             // We slaan op als staged_{randomId}{ext}
             const stagedName = `staged_${randomId}${safeExt}`;
             const finalPath = path.join(TEMP_DIR, stagedName);
-            const totalChunks = Math.ceil(f.size / CHUNK_SIZE);
 
-            // Use global merge logic
-            // Prefix: TEMP_DIR/id_fileId_safeFileName
-            const partPrefix = path.join(TEMP_DIR, `${id}_${f.fileId}_${safeFileName}`);
-            await mergeChunks(partPrefix, totalChunks, finalPath);
+            // Zelfde als POST /shares/:id/chunk + finalize: één bestand …/id_fileId_name.part (geen mergeChunks .part_0/.part_1)
+            const partPath = path.join(TEMP_DIR, `${id}_${f.fileId}_${safeFileName}.part`);
+            try {
+                await fs.access(partPath);
+            } catch {
+                throw new Error(`Missing upload data for "${f.fileName}". Upload incomplete.`);
+            }
+            try {
+                await fs.rename(partPath, finalPath);
+            } catch (e: any) {
+                throw new Error(`Failed to stage "${f.fileName}": ${e.message || 'rename failed'}`);
+            }
 
             // SCAN
             const sizeMultipliers: any = { 'KB': 1024, 'MB': 1024 * 1024, 'GB': 1024 * 1024 * 1024, 'TB': 1024 * 1024 * 1024 * 1024 };
@@ -3305,6 +3426,8 @@ apiRouter.delete('/shares/:id', authenticateToken, uploadLimiter, async (req, re
     const share = await pool.query('SELECT id FROM shares WHERE id = $1 AND user_id = $2', [authReq.params.id, authReq.user!.id]);
 
     if (share.rows.length > 0) {
+        clearUploadSessionKeys(authReq.params.id);
+        await unlinkTempPartFilesForShare(authReq.params.id);
         // EERST proberen bestanden te verwijderen
         try {
             await fs.rm(path.join(UPLOAD_DIR, authReq.params.id), { recursive: true, force: true });
@@ -3493,8 +3616,19 @@ apiRouter.get('/reverse/:id/files', authenticateToken, async (req, res) => {
     res.json(files.rows);
 });
 
-apiRouter.get('/reverse/files/:fileId/download', authenticateToken, downloadLimiter, async (req, res) => {
+apiRouter.all('/reverse/files/:fileId/download', authenticateToken, downloadLimiter, async (req, res) => {
     const authReq = req as AuthRequest;
+    const isHead = req.method === 'HEAD';
+    const wantInline =
+        (typeof req.query.inline === 'string' && req.query.inline === '1') ||
+        (typeof req.query.preview === 'string' && req.query.preview === '1');
+    const previewStreamPost =
+        req.method === 'POST' &&
+        String(req.headers['x-preview-stream'] || '').trim() === '1';
+    if (req.method === 'POST' && !previewStreamPost) {
+        return res.status(405).setHeader('Allow', 'GET, HEAD, OPTIONS, POST').send('POST requires X-Preview-Stream: 1');
+    }
+    const serveInline = wantInline || previewStreamPost;
 
     // Check of de file bestaat EN of de huidige user eigenaar is van de reverse share
     const result = await pool.query(
@@ -3527,6 +3661,29 @@ apiRouter.get('/reverse/files/:fileId/download', authenticateToken, downloadLimi
     const resolvedPath = path.resolve(file.storage_path);
     if (!resolvedPath.startsWith(path.resolve(UPLOAD_DIR))) {
         return res.status(500).json({ error: 'File path security violation' });
+    }
+
+    // Handle HEAD request for PDF preview
+    if (isHead) {
+        const fs = require('fs');
+        res.setHeader('Content-Type', ext === '.pdf' ? 'application/pdf' : 'application/octet-stream');
+        res.setHeader('Content-Length', fs.statSync(resolvedPath).size);
+        res.setHeader('Accept-Ranges', 'bytes');
+        return res.status(200).end();
+    }
+
+    if (serveInline) {
+        const inlineMimes: Record<string, string> = {
+            '.pdf': 'application/pdf',
+            '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp',
+            '.mp4': 'video/mp4', '.webm': 'video/webm', '.ogg': 'video/ogg', '.mov': 'video/quicktime', '.avi': 'video/x-msvideo', '.mkv': 'video/x-matroska',
+            '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.flac': 'audio/flac', '.m4a': 'audio/mp4', '.aac': 'audio/aac'
+        };
+        const mime = inlineMimes[ext] || 'application/octet-stream';
+        res.setHeader('Content-Type', mime);
+        const base = path.basename(file.original_name);
+        res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(base)}`);
+        return res.sendFile(resolvedPath);
     }
 
     res.download(resolvedPath, file.original_name);
@@ -3639,8 +3796,22 @@ apiRouter.post('/shares/:id/verify', loginLimiter, async (req, res) => {
     }
 });
 
-apiRouter.get('/shares/:id/files/:fileId', downloadLimiter, async (req, res) => {
+/** Zelfde logica als /shares/:id/files/:fileId; POST /preview-file/:fileId heeft geen /files/ in het pad (IDM matcht vaak op …/files/…). */
+const shareFileHandler = async (req: any, res: any) => {
     const { id, fileId } = req.params;
+    const isHead = req.method === 'HEAD';
+    /** Browser/preview fetch: geen attachment-dispositie (voorkomt IDM e.d. die de body leeg trekt). */
+    const wantInline =
+        (typeof req.query.inline === 'string' && req.query.inline === '1') ||
+        (typeof req.query.preview === 'string' && req.query.preview === '1');
+    /** POST + header of dedicated preview-route (zonder /files/). */
+    const previewStreamPost =
+        req.previewStreamPost === true ||
+        (req.method === 'POST' && String(req.headers['x-preview-stream'] || '').trim() === '1');
+    if (req.method === 'POST' && !previewStreamPost) {
+        return res.status(405).setHeader('Allow', 'GET, HEAD, OPTIONS, POST').send('POST requires X-Preview-Stream: 1');
+    }
+    const serveInline = wantInline || previewStreamPost;
     const cookieName = `dl_${id}`;
     const authCookieName = `share_auth_${id}`; // De beveiligingscookie
     const cookies = parseCookies(req);
@@ -3697,8 +3868,8 @@ apiRouter.get('/shares/:id/files/:fileId', downloadLimiter, async (req, res) => 
         return res.status(410).send('Expired');
     }
 
-    // Stap 2: Teller ophogen indien nodig
-    if (!hasDownloaded) {
+    // Stap 2: Teller ophogen indien nodig (preview/inline/POST-stream telt niet als download)
+    if (!hasDownloaded && !serveInline) {
         const updateRes = await pool.query(
             `UPDATE shares 
              SET download_count = download_count + 1 
@@ -3733,8 +3904,195 @@ apiRouter.get('/shares/:id/files/:fileId', downloadLimiter, async (req, res) => 
         return res.status(500).send('File path security violation');
     }
 
+    // Handle HEAD request for PDF/video preview - detect content type
+    if (isHead) {
+        const fs = require('fs');
+        const stat = fs.statSync(resolvedPath);
+        const ext = path.extname(data.original_name).toLowerCase();
+        
+        // Map extensions to MIME types
+        const mimeTypes: Record<string, string> = {
+            '.pdf': 'application/pdf',
+            '.mp4': 'video/mp4',
+            '.webm': 'video/webm',
+            '.ogg': 'video/ogg',
+            '.mov': 'video/quicktime',
+            '.avi': 'video/x-msvideo',
+            '.mkv': 'video/x-matroska',
+            '.jpg': 'image/jpeg',
+            '.jpeg': 'image/jpeg',
+            '.png': 'image/png',
+            '.gif': 'image/gif',
+            '.webp': 'image/webp',
+        };
+        
+        res.setHeader('Content-Type', mimeTypes[ext] || 'application/octet-stream');
+        res.setHeader('Content-Length', stat.size);
+        res.setHeader('Accept-Ranges', 'bytes');
+        res.setHeader('X-Download-Options', 'noopen');
+        return res.status(200).end();
+    }
+
+    // Handle Range requests for video streaming
+    if (req.headers.range) {
+        const fs = require('fs');
+        const stat = fs.statSync(resolvedPath);
+        const parts = req.headers.range.replace(/bytes=/, '').split('-');
+        const start = parseInt(parts[0], 10);
+        const end = parts[1] ? parseInt(parts[1], 10) : stat.size - 1;
+        const chunksize = end - start + 1;
+        
+        res.setHeader('Content-Range', `bytes ${start}-${end}/${stat.size}`);
+        res.setHeader('Accept-Ranges', 'bytes');
+        res.setHeader('Content-Length', chunksize);
+        
+        const ext = path.extname(data.original_name).toLowerCase();
+        const videoMimes: Record<string, string> = {
+            '.mp4': 'video/mp4', '.webm': 'video/webm', '.ogg': 'video/ogg',
+            '.mov': 'video/quicktime', '.avi': 'video/x-msvideo', '.mkv': 'video/x-matroska'
+        };
+        res.setHeader('Content-Type', videoMimes[ext] || 'video/mp4');
+        res.status(206);
+        
+        const stream = fs.createReadStream(resolvedPath, { start, end });
+        stream.pipe(res);
+        return;
+    }
+
+    // Inline weergave in browser (preview): geen attachment — anders pakken download-managers de stream af
+    if (serveInline) {
+        const inlineMimes: Record<string, string> = {
+            '.pdf': 'application/pdf',
+            '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.bmp': 'image/bmp',
+            '.mp4': 'video/mp4', '.webm': 'video/webm', '.ogg': 'video/ogg', '.mov': 'video/quicktime', '.avi': 'video/x-msvideo', '.mkv': 'video/x-matroska',
+            '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.flac': 'audio/flac', '.m4a': 'audio/mp4', '.aac': 'audio/aac'
+        };
+        /**
+         * POST /ui/payload: response als JSON + base64 i.p.v. ruwe bytes — download-managers koppelen vaak nog aan
+         * dezelfde URL; zo is er geen PDF/octet-stream body om te onderscheppen.
+         */
+        if (req.uiPayload === true) {
+            const mime = inlineMimes[ext] || 'application/octet-stream';
+            const buf = await fs.readFile(resolvedPath);
+            res.setHeader('Cache-Control', 'no-store');
+            res.setHeader('Content-Type', 'application/json; charset=utf-8');
+            return res.json({ t: mime, d: buf.toString('base64') });
+        }
+        const mime = inlineMimes[ext] || 'application/octet-stream';
+        res.setHeader('Content-Type', mime);
+        const base = path.basename(data.original_name);
+        res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(base)}`);
+        return res.sendFile(resolvedPath);
+    }
+
     res.download(resolvedPath, data.original_name);
+};
+
+/**
+ * SPA inline blob: POST JSON { a: shareId, b: fileId } — pad bevat geen shares/files/preview (download-managers matchen vaak op URL).
+ */
+apiRouter.post('/ui/payload', downloadLimiter, async (req: any, res: any) => {
+    const a = req.body?.a;
+    const b = req.body?.b;
+    if (a == null || a === '' || b == null || b === '') {
+        return res.status(400).json({ error: 'Invalid payload' });
+    }
+    req.params = { id: String(a), fileId: String(b) };
+    req.previewStreamPost = true;
+    req.uiPayload = true;
+    return shareFileHandler(req, res);
 });
+
+/** Staged temp-bestand (My Shares → edit): zelfde JSON+base64 als /ui/payload; GET /preview-stage bestaat alleen voor raw download. */
+apiRouter.post('/ui/staged', authenticateToken, downloadLimiter, async (req: any, res: any) => {
+    const tempIdRaw = req.body?.c;
+    if (tempIdRaw == null || tempIdRaw === '') {
+        return res.status(400).json({ error: 'Invalid payload' });
+    }
+    const tempId = String(tempIdRaw);
+    const tempIdRegex = /^staged_[a-f0-9]{32}(\.[a-zA-Z0-9]+)?$/;
+    if (!tempIdRegex.test(tempId)) {
+        return res.status(403).json({ error: 'Invalid file' });
+    }
+    const filePath = path.join(TEMP_DIR, tempId);
+    if (!path.resolve(filePath).startsWith(path.resolve(TEMP_DIR))) {
+        return res.status(403).json({ error: 'Invalid path' });
+    }
+    try {
+        await fs.access(filePath);
+    } catch {
+        return res.status(404).json({ error: 'Not found' });
+    }
+    const ext = path.extname(tempId).toLowerCase();
+    const dangerousTypes = ['.html', '.htm', '.xhtml', '.svg', '.xml', '.php'];
+    if (dangerousTypes.includes(ext)) {
+        return res.status(403).json({ error: 'Preview not allowed' });
+    }
+    const inlineMimes: Record<string, string> = {
+        '.pdf': 'application/pdf',
+        '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.bmp': 'image/bmp',
+        '.mp4': 'video/mp4', '.webm': 'video/webm'
+    };
+    const mime = inlineMimes[ext] || 'application/octet-stream';
+    const buf = await fs.readFile(filePath);
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    return res.json({ t: mime, d: buf.toString('base64') });
+});
+
+/** Reverse-share bestand (eigenaar): JSON+base64 i.p.v. GET …/reverse/files/:id/download (pdf.js / IDM). */
+apiRouter.post('/ui/reverse-file', authenticateToken, downloadLimiter, async (req: any, res: any) => {
+    const authReq = req as AuthRequest;
+    const fileIdRaw = req.body?.e;
+    if (fileIdRaw == null || fileIdRaw === '') {
+        return res.status(400).json({ error: 'Invalid payload' });
+    }
+    const result = await pool.query(
+        `SELECT f.storage_path, f.original_name 
+         FROM files f 
+         JOIN reverse_shares r ON f.reverse_share_id = r.id 
+         WHERE f.id = $1 AND r.user_id = $2`,
+        [fileIdRaw, authReq.user!.id]
+    );
+    if (result.rows.length === 0) {
+        return res.status(404).json({ error: 'Not found' });
+    }
+    const row = result.rows[0];
+    const ext = path.extname(row.original_name).toLowerCase();
+    if (ext === '.lnk' || ext === '.url') {
+        return res.status(400).json({ error: 'Preview not available for this type' });
+    }
+    const resolvedPath = path.resolve(row.storage_path);
+    if (!resolvedPath.startsWith(path.resolve(UPLOAD_DIR))) {
+        return res.status(500).json({ error: 'Invalid path' });
+    }
+    const dangerousTypes = ['.html', '.htm', '.xhtml', '.svg', '.xml', '.php'];
+    if (dangerousTypes.includes(ext)) {
+        return res.status(403).json({ error: 'Preview not allowed' });
+    }
+    const inlineMimes: Record<string, string> = {
+        '.pdf': 'application/pdf',
+        '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.bmp': 'image/bmp',
+        '.mp4': 'video/mp4', '.webm': 'video/webm'
+    };
+    const mime = inlineMimes[ext] || 'application/octet-stream';
+    const buf = await fs.readFile(resolvedPath);
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    return res.json({ t: mime, d: buf.toString('base64') });
+});
+
+apiRouter.post(
+    '/shares/:id/preview-file/:fileId',
+    downloadLimiter,
+    (req: any, _res: any, next: any) => {
+        req.previewStreamPost = true;
+        next();
+    },
+    shareFileHandler
+);
+
+apiRouter.all('/shares/:id/files/:fileId', downloadLimiter, shareFileHandler);
 
 // GUEST UPLOAD
 apiRouter.get('/public/reverse/:id', async (req, res) => {
@@ -3813,7 +4171,7 @@ apiRouter.post('/public/reverse/:id/init', checkUploadLimits, uploadLimiter, asy
 // STAP 2: Chunk Guest Upload
 apiRouter.post('/public/reverse/:id/chunk', checkUploadLimits, uploadLimiter, chunkUploadPublic.single('chunk'), async (req, res) => {
     const { id } = req.params;
-    const { fileName, chunkIndex, fileId } = req.body;
+    const { fileName, chunkIndex, fileId, chunkHash } = req.body;
     if (!isValidId(fileId)) return res.status(400).json({ error: 'Invalid File ID format' });
 
     if (!req.file) return res.status(400).json({ error: 'No data' });
@@ -3861,23 +4219,96 @@ apiRouter.post('/public/reverse/:id/chunk', checkUploadLimits, uploadLimiter, ch
         const maxSize = parseInt(max_size);
         const currentDbUsage = parseInt(current_used);
 
-        // Bij de EERSTE chunk checken we of het totale bestand nog past
-        const chunkIdx = parseInt(chunkIndex);
+        // Content-addressable chunk storage for deduplication
+        const chunkHashDir = path.join(TEMP_DIR, 'chunks');
+        const chunkHashPath = chunkHash ? path.join(chunkHashDir, chunkHash) : null;
+
+        // Verify chunk hash if provided (integrity check)
+        if (chunkHash) {
+            if (!/^[a-fA-F0-9]{64}$/.test(chunkHash)) {
+                await safeUnlink(req.file.path);
+                return res.status(400).json({ error: 'Invalid chunk hash format' });
+            }
+
+            const crypto = await import('crypto');
+            const fileBuffer = await fs.readFile(req.file.path);
+            const hash = crypto.createHash('sha256').update(fileBuffer).digest('hex');
+
+            if (hash !== chunkHash.toLowerCase()) {
+                await safeUnlink(req.file.path);
+                return res.status(400).json({ error: 'Chunk hash mismatch - data corruption detected' });
+            }
+
+            await fs.mkdir(chunkHashDir, { recursive: true }).catch(() => { });
+            const hashStoragePath = path.join(chunkHashDir, chunkHash);
+            try {
+                await fs.copyFile(req.file.path, hashStoragePath);
+            } catch {
+                // File already exists (duplicate chunk)
+            }
+        }
+
+        // Get expected chunk size from header or use default (20MB)
+        const sizeMap: any = { 'KB': 1024, 'MB': 1024 * 1024, 'GB': 1024 * 1024 * 1024, 'TB': 1024 * 1024 * 1024 * 1024 };
+        const defaultChunkSize = 20 * 1024 * 1024; // 20MB default
+        const chunkSize = parseInt(req.headers['x-chunk-size'] as string) || defaultChunkSize;
+
+        const chunkIdx = parseInt(String(chunkIndex), 10);
+        if (!Number.isFinite(chunkIdx) || chunkIdx < 0) {
+            await safeUnlink(req.file.path);
+            return res.status(400).json({ error: 'Invalid chunk index' });
+        }
+
+        /** Zelfde als /shares/:id/chunk: zonder bestaand .part mag chunk > 0 niet (parallel batches retryen tot chunk 0 klaar is). */
+        if (chunkIdx > 0) {
+            try {
+                await fs.access(partFilePath);
+            } catch {
+                await safeUnlink(req.file.path);
+                return res.status(400).json({ error: 'Upload chunk 0 before later chunks for each file.' });
+            }
+        }
+
+        // Bij chunk 0: quota + schone start (na eventuele gefaalde eerdere upload)
         if (chunkIdx === 0) {
             if (maxSize > 0 && currentDbUsage >= maxSize) {
                 await safeUnlink(req.file.path);
                 return res.status(413).json({ error: `Share limit exceeded.` });
             }
-            // Start fresh
             await safeUnlink(partFilePath);
         }
 
-        // 3. Append chunk
+        // Write chunk at the correct offset to handle parallel uploads
         const chunkData = await fs.readFile(req.file.path);
-        await fs.appendFile(partFilePath, chunkData);
+        const offset = chunkIdx * chunkSize;
+        
+        try {
+            const { createWriteStream } = await import('fs');
+            await new Promise<void>((resolve, reject) => {
+                const stream = createWriteStream(partFilePath, { 
+                    flags: 'r+',
+                    start: offset 
+                });
+                stream.on('error', reject);
+                stream.on('finish', resolve);
+                stream.end(chunkData);
+            });
+        } catch {
+            const { createWriteStream } = await import('fs');
+            await new Promise<void>((resolve, reject) => {
+                const stream = createWriteStream(partFilePath, { 
+                    flags: 'w',
+                    start: offset 
+                });
+                stream.on('error', reject);
+                stream.on('finish', resolve);
+                stream.end(chunkData);
+            });
+        }
+
         await safeUnlink(req.file.path);
 
-        res.json({ success: true });
+        res.json({ success: true, chunkIndex: chunkIdx });
     } catch (e: any) {
         if (req.file) await safeUnlink(req.file.path);
         console.error('Guest Chunk error:', e);
@@ -3937,7 +4368,7 @@ apiRouter.post('/public/reverse/:id/finalize', uploadLimiter, async (req, res) =
             // Bereken chunks
             const k = 1024;
             const sizeMap: any = { 'KB': k, 'MB': k * k, 'GB': k * k * k, 'TB': k * k * k * k };
-            const chunkSizeVal = config.chunkSizeVal || 50;
+            const chunkSizeVal = config.chunkSizeVal || 20;
             const chunkSizeUnit = config.chunkSizeUnit || 'MB';
             const CHUNK_SIZE = chunkSizeVal * (sizeMap[chunkSizeUnit] || sizeMap['MB']);
             const totalChunks = Math.ceil(f.size / CHUNK_SIZE);
@@ -4399,3 +4830,4 @@ async function initDB() {
 }
 
 initDB();
+
