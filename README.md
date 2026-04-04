@@ -3,7 +3,7 @@
 <br />
 <div align="center">
   <a href="https://nexoshare.famretera.nl">
-    <img src="./frontend/public/vite.svg" alt="Nexo Share Logo" width="120" />
+    <img src="./frontend/public/logo.svg" alt="Nexo Share Logo" width="120" />
   </a>
 
   <h3 align="center">Nexo Share</h3>
