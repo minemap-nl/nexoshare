@@ -41,6 +41,7 @@ export function LoginPage({ onLogin }: any) {
             .then(r => r.json())
             .then(data => {
                 if (data.token && data.user) {
+                    localStorage.setItem('sso_login', 'true');
                     onLogin(data.user);
                     window.history.replaceState({}, document.title, window.location.pathname);
                 } else {
@@ -87,9 +88,11 @@ export function LoginPage({ onLogin }: any) {
             if (data.requiresSetup2FA) {
                 notify('You must set up 2FA first', 'info');
                 // onLogin accepteert maar 1 parameter (het user object)
+                localStorage.removeItem('sso_login');
                 onLogin(data.user);
                 return;
             }
+            localStorage.removeItem('sso_login');
             onLogin(data.user);
         } else {
             notify(data.error || "Login failed", "error");
@@ -105,6 +108,7 @@ export function LoginPage({ onLogin }: any) {
         });
         const data = await res.json();
         if (res.ok) {
+            localStorage.removeItem('sso_login');
             onLogin(data.user);
         } else {
             notify(data.error || '2FA verification failed', 'error');
@@ -149,6 +153,7 @@ export function LoginPage({ onLogin }: any) {
             }
 
             const data = await verifyRes.json();
+            localStorage.removeItem('sso_login');
             onLogin(data.user);
 
         } catch (err: any) {

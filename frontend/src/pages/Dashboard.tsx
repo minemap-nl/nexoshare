@@ -59,9 +59,11 @@ export function Dashboard({ token, logout }: any) {
     }, []);
 
     const handleLogout = useCallback(() => {
-        if (config.ssoEnabled && config.ssoLogoutUrl && config.ssoLogoutUrl.trim() !== '') {
+        const isSsoLogin = localStorage.getItem('sso_login') === 'true';
+        if (isSsoLogin && config.ssoEnabled && config.ssoLogoutUrl && config.ssoLogoutUrl.trim() !== '') {
             localStorage.removeItem('token');
             localStorage.removeItem('user');
+            localStorage.removeItem('sso_login');
             // Prevent Open Redirect via Helper
             try {
                 const logoutUrl = config.ssoLogoutUrl;
