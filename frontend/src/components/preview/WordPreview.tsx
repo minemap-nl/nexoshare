@@ -42,7 +42,7 @@ const WordPreview: React.FC<WordPreviewProps> = ({ file }) => {
         load();
     }, [file]);
 
-    if (loading) return <div className="flex justify-center items-center h-full"><Loader2 className="w-8 h-8 animate-spin text-purple-500" /></div>;
+    if (loading) return <div className="flex justify-center items-center h-full"><Loader2 className="w-8 h-8 animate-spin text-primary-400" /></div>;
     if (error) return <div className="flex justify-center items-center h-full text-red-400">{error}</div>;
 
     return (

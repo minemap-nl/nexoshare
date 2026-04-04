@@ -8,7 +8,7 @@ import cors from 'cors';
 import nodemailer from 'nodemailer';
 import archiver from 'archiver';
 import crypto from 'crypto';
-import { promises as fs } from 'fs';
+import { promises as fs, type Dirent } from 'fs';
 import path from 'path';
 import dotenv from 'dotenv';
 import axios from 'axios';
@@ -27,6 +27,30 @@ import validator from 'validator';
 import rateLimit from 'express-rate-limit';
 
 dotenv.config();
+
+/** When true (set DEMO_MODE=true in env), aggressive data TTL, no outbound mail, and restricted account routes. */
+const DEMO_MODE = process.env.DEMO_MODE === 'true';
+const DEMO_PUBLIC_URL = process.env.DEMO_APP_URL || 'https://demo-nexoshare.famretera.nl';
+const DEMO_RETENTION_MINUTES = Math.max(1, parseInt(String(process.env.DEMO_DATA_RETENTION_MINUTES || '2'), 10) || 2);
+
+/**
+ * Demo: per-share / per-upload cap equals ClamAV scan cap (nothing larger can be scanned — no bypass).
+ * Set DEMO_MAX_FILE_MB (1–512), default 25 to match typical clamd StreamMaxLength.
+ */
+const DEMO_MAX_FILE_MB = Math.max(1, Math.min(512, parseInt(String(process.env.DEMO_MAX_FILE_MB || '25'), 10) || 25));
+
+/** Demo: max local user rows (default 2: e.g. seed login + wizard-created admin). Set DEMO_MAX_USERS=1 for a single seeded account only. */
+const DEMO_MAX_USERS = Math.max(1, parseInt(String(process.env.DEMO_MAX_USERS || '2'), 10) || 2);
+
+/** Extensions always blocked for authenticated uploads in demo (same baseline as guest blocklist). */
+const DEMO_FORCE_BLOCKED_EXTENSIONS: readonly string[] = [
+    '.exe', '.bat', '.cmd', '.sh', '.ps1', '.vbs', '.php', '.php3', '.php4', '.phtml', '.pl', '.py', '.cgi',
+    '.jsp', '.asp', '.aspx', '.jar', '.msi', '.com', '.scr', '.hta', '.app', '.dmg', '.pkg'
+];
+
+/** Fail-closed ClamAV behaviour: demo always enforces; otherwise follows "Enforce virus scan" in settings. */
+const isClamavScanEnforced = (config: { clamavMustScan?: boolean }) =>
+    DEMO_MODE || !!config.clamavMustScan;
 
 // Validation Schemas
 const reverseShareSchema = z.object({
@@ -349,33 +373,43 @@ const cleanupOrphanedShareFiles = async () => {
     }
 };
 
+/** Verwijdert alleen platte bestanden ouder dan maxAge ms; onder TEMP_DIR/chunks/ recursief (legacy hash-kopieën). */
+const cleanupStaleTempFiles = async (dir: string, now: number, maxAge: number, recurseChunks: boolean): Promise<number> => {
+    let removed = 0;
+    let entries: Dirent[];
+    try {
+        entries = await fs.readdir(dir, { withFileTypes: true });
+    } catch {
+        return 0;
+    }
+    for (const ent of entries) {
+        const filePath = path.join(dir, ent.name);
+        try {
+            if (ent.isDirectory()) {
+                if (recurseChunks && ent.name === 'chunks') {
+                    removed += await cleanupStaleTempFiles(filePath, now, maxAge, false);
+                }
+                continue;
+            }
+            const stats = await fs.stat(filePath);
+            if (now - stats.mtimeMs > maxAge) {
+                await fs.unlink(filePath);
+                removed++;
+            }
+        } catch {
+            /* weg of locked */
+        }
+    }
+    return removed;
+};
+
 // Cleanup tijdelijke bestanden: Elke 15 Minutes draaien
 cron.schedule('*/15 * * * *', async () => {
     console.log('🧹 Start cleaning up temporary files...');
     try {
-        const files = await fs.readdir(TEMP_DIR);
         const now = Date.now();
-
-        // Agressievere cleanup: bestanden ouder dan 30 Minutes verwijderen
-        // Zolang een upload bezig is, update de 'mtime' en wordt hij niet verwijderd.
         const maxAge = 30 * 60 * 1000;
-
-        let deletedCount = 0;
-        for (const file of files) {
-            try {
-                const filePath = path.join(TEMP_DIR, file);
-                const stats = await fs.stat(filePath);
-
-                // Als bestand ouder is dan 1 uur
-                if (now - stats.mtimeMs > maxAge) {
-                    await fs.unlink(filePath);
-                    deletedCount++;
-                }
-            } catch (e) {
-                // Bestand misschien al weg of locked, negeren
-            }
-        }
-
+        const deletedCount = await cleanupStaleTempFiles(TEMP_DIR, now, maxAge, true);
         console.log(`✅ Temp cleanup finished. ${deletedCount} files removed.`);
     } catch (e) {
         console.error('❌ Fout bij temp cleanup:', e);
@@ -596,6 +630,26 @@ const getBytes = (val: number, unit: string) => {
     return val * (map[unit] || k * k * k);
 };
 
+/** Hard limits and risky flags for public demo (called from getConfig and PUT /config). */
+function applyDemoSecurityPolicy(config: any): void {
+    if (!DEMO_MODE) return;
+    config.maxScanSizeVal = DEMO_MAX_FILE_MB;
+    config.maxScanSizeUnit = 'MB';
+    config.maxSizeVal = DEMO_MAX_FILE_MB;
+    config.maxSizeUnit = 'MB';
+    config.clamavMustScan = true;
+    config.ssoEnabled = false;
+    config.ssoAutoRedirect = false;
+    config.smtpAllowLocal = false;
+    config.allowPasswordReset = false;
+    const merged = new Set<string>();
+    for (const ext of DEMO_FORCE_BLOCKED_EXTENSIONS) merged.add(ext);
+    for (const ext of config.blockedExtensionsUser || []) {
+        if (typeof ext === 'string' && ext.length > 0) merged.add(ext.toLowerCase());
+    }
+    config.blockedExtensionsUser = Array.from(merged);
+}
+
 // --- Security Helpers ---
 
 // Safe Unlink: Prevents deleting files outside allowed directories
@@ -639,6 +693,105 @@ const unlinkTempPartFilesForShare = async (shareId: string) => {
     } catch { /* noop */ }
 };
 
+/** Share chunked uploads use TEMP_DIR part files `<shareId>_...part` (not `rev_...`). */
+const getShareIdsWithOpenPartFiles = async (): Promise<Set<string>> => {
+    const ids = new Set<string>();
+    try {
+        const dir = await fs.readdir(TEMP_DIR);
+        for (const name of dir) {
+            if (!name.endsWith('.part') || name.startsWith('rev_')) continue;
+            const idx = name.indexOf('_');
+            if (idx > 0) ids.add(name.slice(0, idx));
+        }
+    } catch { /* noop */ }
+    return ids;
+};
+
+/** Reverse guest chunked uploads use TEMP_DIR files named `rev_<reverseShareId>_...part`. */
+const getReverseShareIdsWithOpenGuestParts = async (): Promise<Set<string>> => {
+    const ids = new Set<string>();
+    try {
+        const dir = await fs.readdir(TEMP_DIR);
+        for (const name of dir) {
+            if (!name.startsWith('rev_') || !name.endsWith('.part')) continue;
+            const rest = name.slice(4);
+            const id = rest.split('_')[0];
+            if (id) ids.add(id);
+        }
+    } catch { /* noop */ }
+    return ids;
+};
+
+if (DEMO_MODE) {
+    cron.schedule('*/5 * * * *', async () => {
+        const activeShareSessions = new Set<string>([
+            ...uploadSessionBudget.keys(),
+            ...uploadSessionBytesUsed.keys(),
+            ...(await getShareIdsWithOpenPartFiles())
+        ]);
+        const reverseWithParts = await getReverseShareIdsWithOpenGuestParts();
+        console.log(`[DEMO] Cleanup: removing data older than ${DEMO_RETENTION_MINUTES} minutes (skipping active upload sessions)...`);
+        const client = await pool.connect();
+        try {
+            const res = await client.query(
+                `SELECT id FROM shares WHERE created_at < NOW() - ($1::text || ' minutes')::INTERVAL`,
+                [String(DEMO_RETENTION_MINUTES)]
+            );
+            const resReverse = await client.query(
+                `SELECT id FROM reverse_shares WHERE created_at < NOW() - ($1::text || ' minutes')::INTERVAL`,
+                [String(DEMO_RETENTION_MINUTES)]
+            );
+
+            const deleteFolder = async (id: string) => {
+                const sharePath = path.join(UPLOAD_DIR, id);
+                await fs.rm(sharePath, { recursive: true, force: true }).catch(() => { });
+            };
+
+            for (const row of res.rows) {
+                if (activeShareSessions.has(row.id)) continue;
+                await deleteFolder(row.id);
+            }
+            for (const row of resReverse.rows) {
+                if (reverseWithParts.has(row.id)) continue;
+                await deleteFolder(row.id);
+            }
+
+            const skipShareIds = Array.from(activeShareSessions);
+            const skipReverseIds = Array.from(reverseWithParts);
+            await client.query(
+                `DELETE FROM shares WHERE created_at < NOW() - ($1::text || ' minutes')::INTERVAL AND NOT (id = ANY($2::text[]))`,
+                [String(DEMO_RETENTION_MINUTES), skipShareIds]
+            );
+            await client.query(
+                `DELETE FROM reverse_shares WHERE created_at < NOW() - ($1::text || ' minutes')::INTERVAL AND NOT (id = ANY($2::text[]))`,
+                [String(DEMO_RETENTION_MINUTES), skipReverseIds]
+            );
+
+            const guestRes = await client.query(
+                `SELECT id, storage_path FROM files 
+                 WHERE created_at < NOW() - ($1::text || ' minutes')::INTERVAL 
+                 AND share_id IS NULL AND reverse_share_id IS NULL`,
+                [String(DEMO_RETENTION_MINUTES)]
+            );
+            for (const f of guestRes.rows) {
+                await fs.unlink(f.storage_path).catch(() => { });
+                await client.query('DELETE FROM files WHERE id = $1', [f.id]);
+            }
+
+            await pool.query(
+                "DELETE FROM sso_tokens WHERE created_at < NOW() - ($1::text || ' minutes')::INTERVAL",
+                [String(DEMO_RETENTION_MINUTES)]
+            );
+
+            console.log('[DEMO] Cleanup finished.');
+        } catch (e) {
+            console.error('[DEMO] Cleanup error:', e);
+        } finally {
+            client.release();
+        }
+    });
+}
+
 // --- Global Cache Variables ---
 let configCache: any = null;
 let configCacheTime = 0;
@@ -677,7 +830,7 @@ async function getConfig() {
             serverTimezone: process.env.TZ || 'UTC'
         };
 
-        let finalConfig = defaults;
+        let finalConfig: any = defaults;
 
         // Check if DB has data
         if (res && res.rows && res.rows.length > 0) {
@@ -686,6 +839,40 @@ async function getConfig() {
                 ...(res.rows[0].data || {}),
                 setupCompleted: res.rows[0].setup_completed || false
             };
+        }
+
+        if (DEMO_MODE) {
+            let demoUserCount = 0;
+            try {
+                const ur = await pool.query('SELECT COUNT(*)::int AS c FROM users');
+                demoUserCount = ur.rows[0]?.c ?? 0;
+            } catch {
+                demoUserCount = 0;
+            }
+            finalConfig = {
+                ...finalConfig,
+                appName: finalConfig.appName || 'Nexo Share Demo',
+                appUrl: DEMO_PUBLIC_URL,
+                sessionVal: 1,
+                sessionUnit: 'Hours',
+                secureCookies: true,
+                defaultExpirationVal: 5,
+                defaultExpirationUnit: 'Minutes',
+                maxExpirationVal: 5,
+                maxExpirationUnit: 'Minutes',
+                /**
+                 * No users: force incomplete setup. With users: follow DB `setup_completed` so a seeded
+                 * placeholder (e.g. admin@nexoshare.com) can still run the wizard while setup_completed is false.
+                 */
+                setupCompleted: demoUserCount === 0 ? false : !!finalConfig.setupCompleted,
+                smtpHost: '',
+                smtpPort: 0,
+                smtpUser: '',
+                smtpPass: '',
+                demoMode: true,
+                demoDataRetentionMinutes: DEMO_RETENTION_MINUTES
+            };
+            applyDemoSecurityPolicy(finalConfig);
         }
 
         // Update Cache
@@ -843,6 +1030,10 @@ const isStrongPassword = (password: string): { valid: boolean; error?: string } 
 
 /** Returns true only when mail was actually handed to SMTP (not skipped: no SMTP, invalid address). */
 async function sendEmail(to: string, subject: string, rawMessage: string, ctaLink?: string, ctaText?: string): Promise<boolean> {
+    if (DEMO_MODE) {
+        console.log(`[DEMO] Email not sent — To: ${to}, Subject: ${subject}`);
+        return false;
+    }
     const config = await getConfig();
     if (!config.smtpHost) return false;
     if (!isValidEmail(to)) {
@@ -1053,7 +1244,7 @@ const scanFiles = async (files: Express.Multer.File[]) => {
     // 2. Check of scanner beschikbaar is
     if (!clamscanInstance) {
         // Is de 'Verplicht Scannen' optie aangevinkt?
-        if (config.clamavMustScan) {
+        if (isClamavScanEnforced(config)) {
             // FAIL-CLOSED: Scanner verplicht maar offline -> ERROR
             console.error("⛔ Upload blocked: ClamAV is offline, but 'Enforce Virus Scan' is turned on.");
             throw new Error("Security error: Virus scanner unavailable, upload refused.");
@@ -1075,7 +1266,7 @@ const scanFiles = async (files: Express.Multer.File[]) => {
             const fileSizeMB = (file.size / (1024 * 1024)).toFixed(1);
             const limitMB = (maxScanBytes / (1024 * 1024)).toFixed(0);
 
-            if (config.clamavMustScan) {
+            if (isClamavScanEnforced(config)) {
                 // FAIL-CLOSED: Bestand te groot en scannen is verplicht
                 await safeUnlink(file.path);
                 throw new Error(
@@ -1110,7 +1301,7 @@ const scanFiles = async (files: Express.Multer.File[]) => {
             }
 
             // Ook hier: als scannen verplicht is, mag een error niet genegeerd worden
-            if (config.clamavMustScan) {
+            if (isClamavScanEnforced(config)) {
                 console.error(`Scan error (Closed): ${e.message}`);
                 throw new Error("Error during virusscan. Try again later.");
             } else {
@@ -1144,7 +1335,8 @@ const storage = multer.diskStorage({
         cb(null, crypto.randomBytes(8).toString('hex') + ext);
     }
 });
-const upload = multer({ storage, limits: { fileSize: 1024 * 1024 * 1024 * 1024 } });
+const MAIN_UPLOAD_FILE_LIMIT = DEMO_MODE ? getBytes(DEMO_MAX_FILE_MB, 'MB') : 1024 * 1024 * 1024 * 1024;
+const upload = multer({ storage, limits: { fileSize: MAIN_UPLOAD_FILE_LIMIT } });
 
 // --- SYSTEM UPLOAD CONFIG ---
 const systemStorage = multer.diskStorage({
@@ -1368,6 +1560,7 @@ apiRouter.post('/auth/2fa/setup', authenticateToken, async (req, res) => {
 
 // 2FA - Enable (Verify and Save)
 apiRouter.post('/auth/2fa/enable', authenticateToken, async (req, res) => {
+    if (DEMO_MODE) return res.status(403).json({ error: 'Demo mode: 2FA setup is disabled.' });
     try {
         const authReq = req as AuthRequest;
         const { secret, code } = req.body;
@@ -1408,6 +1601,7 @@ apiRouter.post('/auth/2fa/enable', authenticateToken, async (req, res) => {
 
 // 2FA - Disable
 apiRouter.post('/auth/2fa/disable', authenticateToken, async (req, res) => {
+    if (DEMO_MODE) return res.status(403).json({ error: 'Demo mode: 2FA changes are disabled.' });
     try {
         const authReq = req as AuthRequest;
         const { password } = req.body;
@@ -1460,6 +1654,7 @@ apiRouter.get('/auth/2fa/status', authenticateToken, async (req, res) => {
 
 // 2FA - Admin Reset for User
 apiRouter.post('/users/:id/2fa/reset', authenticateToken, requireAdmin, async (req, res) => {
+    if (DEMO_MODE) return res.status(403).json({ error: 'Demo mode: 2FA reset is disabled.' });
     try {
         await pool.query(
             'UPDATE users SET totp_secret = NULL, totp_enabled = FALSE, backup_codes = NULL WHERE id = $1',
@@ -1478,6 +1673,7 @@ apiRouter.post('/users/:id/2fa/reset', authenticateToken, requireAdmin, async (r
 
 // PASSKEYS - Registration Options
 apiRouter.post('/passkeys/register/options', authenticateToken, async (req, res) => {
+    if (DEMO_MODE) return res.status(403).json({ error: 'Demo mode: registering passkeys is disabled.' });
     try {
         const authReq = req as AuthRequest;
         const user = await pool.query('SELECT * FROM users WHERE id = $1', [authReq.user!.id]);
@@ -1510,6 +1706,7 @@ apiRouter.post('/passkeys/register/options', authenticateToken, async (req, res)
 
 // PASSKEYS - Verify Registration
 apiRouter.post('/passkeys/register/verify', authenticateToken, async (req, res) => {
+    if (DEMO_MODE) return res.status(403).json({ error: 'Demo mode: passkey setup is disabled.' });
     try {
         const authReq = req as AuthRequest;
         const { response, name } = req.body;
@@ -1571,6 +1768,7 @@ apiRouter.get('/passkeys', authenticateToken, async (req, res) => {
 
 // PASSKEYS - Delete
 apiRouter.delete('/passkeys/:id', authenticateToken, async (req, res) => {
+    if (DEMO_MODE) return res.status(403).json({ error: 'Demo mode: deleting passkeys is disabled.' });
     try {
         const authReq = req as AuthRequest;
         await pool.query(
@@ -2115,7 +2313,9 @@ apiRouter.get('/config', async (req, res) => {
             allowPasskeys: config.allowPasskeys,
             allowPasswordReset: config.allowPasswordReset,
             smtpConfigured: !!config.smtpHost, // Stuurt true/false i.p.v. de server gegevens
-            appLocale: config.appLocale || 'en-GB'
+            appLocale: config.appLocale || 'en-GB',
+            demoMode: DEMO_MODE,
+            ...(DEMO_MODE ? { demoDataRetentionMinutes: DEMO_RETENTION_MINUTES, demoMaxFileMb: DEMO_MAX_FILE_MB } : {})
         };
 
         const cookies = parseCookies(req);
@@ -2127,7 +2327,11 @@ apiRouter.get('/config', async (req, res) => {
             if (err) return res.json(publicConfig);
             if (decoded && decoded.isAdmin) {
                 // VEILIGHEIDS Maskeer geheimen voordat ze naar frontend gaan
-                const safeConfig = { ...config };
+                const safeConfig = {
+                    ...config,
+                    demoMode: DEMO_MODE,
+                    ...(DEMO_MODE ? { demoDataRetentionMinutes: DEMO_RETENTION_MINUTES, demoMaxFileMb: DEMO_MAX_FILE_MB } : {})
+                };
                 if (safeConfig.smtpPass) safeConfig.smtpPass = '********';
                 if (safeConfig.oidcSecret) safeConfig.oidcSecret = '********';
 
@@ -2159,6 +2363,7 @@ const checkConfigPermission = async (req: Request, res: Response): Promise<boole
 
 // SYSTEM BRANDING UPLOAD
 apiRouter.post('/config/branding', uploadSystem.fields([{ name: 'logo', maxCount: 1 }, { name: 'favicon', maxCount: 1 }]), async (req, res) => {
+    if (DEMO_MODE) return res.status(403).json({ error: 'Branding upload is disabled in demo mode.' });
     if (!await checkConfigPermission(req, res)) return;
     try {
         const files = req.files as { [fieldname: string]: Express.Multer.File[] };
@@ -2211,6 +2416,10 @@ apiRouter.put('/config', async (req, res) => {
         // Ensure critical booleans are preserved/updated correctly
         finalConfig.setup_completed = currentConfig.setupCompleted; // Never allow overwrite via API
 
+        if (DEMO_MODE) {
+            applyDemoSecurityPolicy(finalConfig);
+        }
+
         await pool.query(
             `INSERT INTO config (id, data, setup_completed) VALUES (1, $1, $2) 
              ON CONFLICT (id) DO UPDATE SET data = $1`,
@@ -2241,6 +2450,7 @@ apiRouter.post('/config/setup-complete', async (req, res) => {
 
 // TEST EMAIL FUNCTIE
 apiRouter.post('/config/test-email', async (req, res) => {
+    if (DEMO_MODE) return res.status(403).json({ error: 'Test email is disabled in demo mode.' });
     if (!await checkConfigPermission(req, res)) return;
     try {
         const { smtpHost, smtpPort, smtpUser, smtpPass, smtpSecure, testEmail, smtpFrom, smtpAllowLocal } = req.body;
@@ -2290,6 +2500,10 @@ apiRouter.post('/users', async (req, res) => {
     const countCheck = await pool.query('SELECT COUNT(*) FROM users');
     const userCount = parseInt(countCheck.rows[0].count);
 
+    if (DEMO_MODE && userCount >= DEMO_MAX_USERS) {
+        return res.status(403).json({ error: `Demo mode: maximum ${DEMO_MAX_USERS} user account(s) allowed.` });
+    }
+
     if (userCount > 0) {
         // Normal flow: Check Token & Admin rights manually since we removed middleware
         const cookies = parseCookies(req);
@@ -2316,9 +2530,16 @@ apiRouter.post('/users', async (req, res) => {
     }
 
     const hash = await Bun.password.hash(password);
+    const effectiveIsAdmin = userCount === 0 ? true : !!is_admin;
     try {
-        const result = await pool.query('INSERT INTO users (email, password_hash, name, is_admin) VALUES ($1, $2, $3, $4) RETURNING id', [email, hash, name, is_admin]);
-        await logAudit((req as AuthRequest).user!.id, 'user_created', 'user', result.rows[0].id.toString(), req, { email, is_admin });
+        const result = await pool.query(
+            'INSERT INTO users (email, password_hash, name, is_admin) VALUES ($1, $2, $3, $4) RETURNING id',
+            [email, hash, name, effectiveIsAdmin]
+        );
+        await logAudit((req as AuthRequest).user?.id ?? null, 'user_created', 'user', result.rows[0].id.toString(), req, {
+            email,
+            is_admin: effectiveIsAdmin
+        });
         res.json({ success: true });
     } catch (e) {
         console.error(e);
@@ -2350,6 +2571,7 @@ apiRouter.get('/users/me', authenticateToken, async (req, res) => {
 
 // USER - Update Own Profile
 apiRouter.put('/users/profile', authenticateToken, async (req, res) => {
+    if (DEMO_MODE) return res.status(403).json({ error: 'Demo mode: profile changes are disabled.' });
     const authReq = req as AuthRequest;
     const { email, password, name } = authReq.body;
     const myId = authReq.user!.id;
@@ -2423,6 +2645,7 @@ apiRouter.put('/users/profile', authenticateToken, async (req, res) => {
 
 // USER - Delete Own Account
 apiRouter.delete('/users/me/delete', authenticateToken, async (req, res) => {
+    if (DEMO_MODE) return res.status(403).json({ error: 'Demo mode: account deletion is disabled.' });
     try {
         const authReq = req as AuthRequest;
         const { password } = req.body;
@@ -2449,6 +2672,7 @@ apiRouter.delete('/users/me/delete', authenticateToken, async (req, res) => {
 
 // ADMIN - Update User
 apiRouter.put('/users/:id', authenticateToken, requireAdmin, async (req, res) => {
+    if (DEMO_MODE) return res.status(403).json({ error: 'Demo mode: modifying users is disabled.' });
     const authReq = req as AuthRequest;
     const { email, password, name, is_admin } = authReq.body;
     const targetId = authReq.params.id;
@@ -2495,6 +2719,7 @@ apiRouter.put('/users/:id', authenticateToken, requireAdmin, async (req, res) =>
 
 // ADMIN - Delete User
 apiRouter.delete('/users/:id', authenticateToken, requireAdmin, async (req, res) => {
+    if (DEMO_MODE) return res.status(403).json({ error: 'Demo mode: deleting users is disabled.' });
     const userId = req.params.id;
     const authReq = req as AuthRequest;
 
@@ -2657,10 +2882,12 @@ const checkExtension = (filename: string, blocklist: string[]) => {
     return true;
 };
 
+const CHUNK_BODY_LIMIT = DEMO_MODE ? getBytes(DEMO_MAX_FILE_MB, 'MB') : 500 * 1024 * 1024;
+
 // 1. Authenticated Uploads
 const chunkUploadAuth = multer({
     storage: chunkStorage,
-    limits: { fileSize: 500 * 1024 * 1024, files: 1 },
+    limits: { fileSize: CHUNK_BODY_LIMIT, files: 1 },
     fileFilter: (req, file, cb) => {
         getConfig().then(config => {
             const blocklist = config.blockedExtensionsUser || [];
@@ -2675,7 +2902,7 @@ const chunkUploadAuth = multer({
 // 2. Public / Reverse Uploads
 const chunkUploadPublic = multer({
     storage: chunkStorage,
-    limits: { fileSize: 500 * 1024 * 1024, files: 1 },
+    limits: { fileSize: CHUNK_BODY_LIMIT, files: 1 },
     fileFilter: (req, file, cb) => {
         getConfig().then(config => {
             // Default fallback als config leeg zou zijn (veiligheid)
@@ -2718,8 +2945,6 @@ apiRouter.post('/shares/:id/chunk', authenticateToken, uploadLimiter, chunkUploa
         const chunkData = await fs.readFile(req.file.path);
         const chunkLen = chunkData.length;
 
-        const chunkHashDir = path.join(TEMP_DIR, 'chunks');
-
         if (chunkHash) {
             if (!/^[a-fA-F0-9]{64}$/.test(chunkHash)) {
                 await safeUnlink(req.file.path);
@@ -2732,14 +2957,6 @@ apiRouter.post('/shares/:id/chunk', authenticateToken, uploadLimiter, chunkUploa
             if (hash !== chunkHash.toLowerCase()) {
                 await safeUnlink(req.file.path);
                 return res.status(400).json({ error: 'Chunk hash mismatch - data corruption detected' });
-            }
-
-            await fs.mkdir(chunkHashDir, { recursive: true }).catch(() => { });
-            const hashStoragePath = path.join(chunkHashDir, chunkHash);
-            try {
-                await fs.copyFile(req.file.path, hashStoragePath);
-            } catch {
-                // File already exists (duplicate chunk from different file)
             }
         }
 
@@ -2899,7 +3116,7 @@ apiRouter.post('/shares/:id/finalize', authenticateToken, uploadLimiter, async (
             if (f.size > maxScanBytes) {
                 const fileSizeMB = (f.size / (1024 * 1024)).toFixed(1);
                 const limitMB = (maxScanBytes / (1024 * 1024)).toFixed(0);
-                if (config.clamavMustScan) {
+                if (isClamavScanEnforced(config)) {
                     await safeUnlink(finalPath);
                     throw new Error(
                         `File "${f.originalName}" (${fileSizeMB} MB) exceeds virus scan limit (${limitMB} MB). ` +
@@ -2924,10 +3141,10 @@ apiRouter.post('/shares/:id/finalize', authenticateToken, uploadLimiter, async (
                             `Increase StreamMaxLength in clamd.conf to at least ${suggestedMB}M.`
                         );
                     }
-                    if (config.clamavMustScan) throw new Error("Virus scan error. Try again later.");
+                    if (isClamavScanEnforced(config)) throw new Error("Virus scan error. Try again later.");
                     console.warn(`Scan error (Open): ${scanErr.message}`);
                 }
-            } else if (config.clamavMustScan) {
+            } else if (isClamavScanEnforced(config)) {
                 await safeUnlink(finalPath);
                 throw new Error("Virus scanner unavailable, upload refused.");
             }
@@ -3239,7 +3456,7 @@ apiRouter.post('/shares/:id/stage', authenticateToken, uploadLimiter, async (req
             if (f.size > maxScanBytes) {
                 const fileSizeMB = (f.size / (1024 * 1024)).toFixed(1);
                 const limitMB = (maxScanBytes / (1024 * 1024)).toFixed(0);
-                if (config.clamavMustScan) {
+                if (isClamavScanEnforced(config)) {
                     await safeUnlink(finalPath);
                     throw new Error(
                         `File "${f.fileName}" (${fileSizeMB} MB) exceeds virus scan limit (${limitMB} MB). ` +
@@ -3264,10 +3481,10 @@ apiRouter.post('/shares/:id/stage', authenticateToken, uploadLimiter, async (req
                             `Increase StreamMaxLength in clamd.conf to at least ${suggestedMB}M.`
                         );
                     }
-                    if (config.clamavMustScan) throw new Error("Virus scan error. Try again later.");
+                    if (isClamavScanEnforced(config)) throw new Error("Virus scan error. Try again later.");
                     console.warn(`Scan error (Open): ${scanErr.message}`);
                 }
-            } else if (config.clamavMustScan) {
+            } else if (isClamavScanEnforced(config)) {
                 await safeUnlink(finalPath);
                 throw new Error("Virus scanner unavailable, upload refused.");
             }
@@ -3554,6 +3771,10 @@ apiRouter.post('/reverse', authenticateToken, async (req, res) => {
         // Haal de nieuwe expiration velden op
         const { name, maxSize, expirationVal, expirationUnit, password, notify, sendEmailTo, thankYouMessage, customSlug } = validated;
 
+        const config = await getConfig();
+        const maxAllowedBytes = getBytes(config.maxSizeVal || 10, config.maxSizeUnit || 'GB');
+        const cappedMaxSize = Math.min(maxSize, maxAllowedBytes);
+
         // Default naam instellen als deze leeg is
         const finalName = (name && name.trim() !== '') ? name : 'Reverse Share';
 
@@ -3580,9 +3801,8 @@ apiRouter.post('/reverse', authenticateToken, async (req, res) => {
         // Voeg thank_you_message toe aan insert
         await pool.query(
             `INSERT INTO reverse_shares (id, user_id, name, max_size, expires_at, password_hash, notify_email, thank_you_message) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-            [id, authReq.user!.id, finalName, maxSize, expiresAt, passHash, notify, thankYouMessage || null]
+            [id, authReq.user!.id, finalName, cappedMaxSize, expiresAt, passHash, notify, thankYouMessage || null]
         );
-        const config = await getConfig();
         const baseUrl = getBaseUrl(config, req);
         const link = `${baseUrl}/r/${id}`;
         if (sendEmailTo) { await sendEmail(sendEmailTo, 'Upload Request', `<strong>${escapeHtml(authReq.user!.email)}</strong> invited you to upload files.`, link, 'Upload Files'); }
@@ -4219,32 +4439,20 @@ apiRouter.post('/public/reverse/:id/chunk', checkUploadLimits, uploadLimiter, ch
         const maxSize = parseInt(max_size);
         const currentDbUsage = parseInt(current_used);
 
-        // Content-addressable chunk storage for deduplication
-        const chunkHashDir = path.join(TEMP_DIR, 'chunks');
-        const chunkHashPath = chunkHash ? path.join(chunkHashDir, chunkHash) : null;
+        const chunkData = await fs.readFile(req.file.path);
 
-        // Verify chunk hash if provided (integrity check)
         if (chunkHash) {
             if (!/^[a-fA-F0-9]{64}$/.test(chunkHash)) {
                 await safeUnlink(req.file.path);
                 return res.status(400).json({ error: 'Invalid chunk hash format' });
             }
 
-            const crypto = await import('crypto');
-            const fileBuffer = await fs.readFile(req.file.path);
-            const hash = crypto.createHash('sha256').update(fileBuffer).digest('hex');
+            const cryptoMod = await import('crypto');
+            const hash = cryptoMod.createHash('sha256').update(chunkData).digest('hex');
 
             if (hash !== chunkHash.toLowerCase()) {
                 await safeUnlink(req.file.path);
                 return res.status(400).json({ error: 'Chunk hash mismatch - data corruption detected' });
-            }
-
-            await fs.mkdir(chunkHashDir, { recursive: true }).catch(() => { });
-            const hashStoragePath = path.join(chunkHashDir, chunkHash);
-            try {
-                await fs.copyFile(req.file.path, hashStoragePath);
-            } catch {
-                // File already exists (duplicate chunk)
             }
         }
 
@@ -4278,8 +4486,6 @@ apiRouter.post('/public/reverse/:id/chunk', checkUploadLimits, uploadLimiter, ch
             await safeUnlink(partFilePath);
         }
 
-        // Write chunk at the correct offset to handle parallel uploads
-        const chunkData = await fs.readFile(req.file.path);
         const offset = chunkIdx * chunkSize;
         
         try {
@@ -4398,7 +4604,7 @@ apiRouter.post('/public/reverse/:id/finalize', uploadLimiter, async (req, res) =
             if (f.size > maxScanBytes) {
                 const fileSizeMB = (f.size / (1024 * 1024)).toFixed(1);
                 const limitMB = (maxScanBytes / (1024 * 1024)).toFixed(0);
-                if (config.clamavMustScan) {
+                if (isClamavScanEnforced(config)) {
                     await safeUnlink(finalPath);
                     throw new Error(
                         `File "${f.originalName}" (${fileSizeMB} MB) exceeds virus scan limit (${limitMB} MB). ` +
@@ -4422,10 +4628,10 @@ apiRouter.post('/public/reverse/:id/finalize', uploadLimiter, async (req, res) =
                             `Virus scanner rejected file due to size limit. Please contact the administrator.`
                         );
                     }
-                    if (config.clamavMustScan) throw new Error("Virus scan error. Try again later.");
+                    if (isClamavScanEnforced(config)) throw new Error("Virus scan error. Try again later.");
                     console.warn(`Scan error (Open): ${scanErr.message}`);
                 }
-            } else if (config.clamavMustScan) {
+            } else if (isClamavScanEnforced(config)) {
                 await safeUnlink(finalPath);
                 throw new Error("Security error: Virus scanner is unavailable.");
             }
@@ -4753,7 +4959,22 @@ async function initDB() {
                 // 1c. Admin Check & Setup
                 const adminCheck = await client.query('SELECT COUNT(*) FROM users');
                 if (adminCheck.rows && adminCheck.rows.length > 0) {
-                    if (parseInt(adminCheck.rows[0].count) === 0) {
+                    if (DEMO_MODE) {
+                        const demoHash = await Bun.password.hash('demo');
+                        if (parseInt(adminCheck.rows[0].count) === 0) {
+                            await client.query(
+                                `INSERT INTO users (email, password_hash, name, is_admin) VALUES ($1, $2, $3, $4)`,
+                                ['demo@nexoshare.com', demoHash, 'Demo Admin', true]
+                            );
+                            console.log('✅ [DEMO] Demo user created: demo@nexoshare.com / demo');
+                        } else {
+                            await client.query(
+                                `UPDATE users SET password_hash = $1, email = 'demo@nexoshare.com' WHERE id = 1`,
+                                [demoHash]
+                            );
+                            console.log('✅ [DEMO] User id 1 password reset to "demo" (demo@nexoshare.com).');
+                        }
+                    } else if (parseInt(adminCheck.rows[0].count) === 0) {
                         const hash = await Bun.password.hash('admin123');
                         await client.query(`INSERT INTO users (email, password_hash, name, is_admin) VALUES ($1, $2, $3, $4)`, ['admin@nexoshare.com', hash, 'Super Admin', true]);
                         console.log('✅ DB Initialized & Healed. Login: admin@nexoshare.com / admin123');
@@ -4815,7 +5036,14 @@ async function initDB() {
                     }
                 });
 
-                app.listen(PORT, () => console.log(`🚀 API on ${PORT}`));
+                app.listen(PORT, () => {
+                    console.log(`🚀 API on ${PORT}`);
+                    if (DEMO_MODE) {
+                        console.log(
+                            `📌 DEMO_MODE active — data TTL ~${DEMO_RETENTION_MINUTES} min, upload/scan cap ${DEMO_MAX_FILE_MB} MB (aligned), max users ${DEMO_MAX_USERS}, ClamAV enforced, SSO/password-reset off, risky extensions blocked for users. (User rows are not auto-deleted; use DB refresh or DEMO_MAX_USERS.)`
+                        );
+                    }
+                });
             }
             return; // Succesvolle start, verlaat de retry loop
 

@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="213" height="213" viewBox="0 0 213 213" fill="none"><metadata><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:dc="http://purl.org/dc/elements/1.1/"><rdf:Description><dc:creator>RealFaviconGenerator</dc:creator><dc:source>https://realfavicongenerator.net</dc:source></rdf:Description></rdf:RDF></metadata><g clip-path="url(#clip0_15_14)">
+<path d="M170.667 0H42.6667C19.1025 0 0 19.1025 0 42.6667V170.667C0 194.231 19.1025 213.333 42.6667 213.333H170.667C194.231 213.333 213.333 194.231 213.333 170.667V42.6667C213.333 19.1025 194.231 0 170.667 0Z" fill="url(#paint0_linear_15_14)"></path>
+<path d="M141.417 81.1667C151.772 81.1667 160.167 72.772 160.167 62.4167C160.167 52.0613 151.772 43.6667 141.417 43.6667C131.061 43.6667 122.667 52.0613 122.667 62.4167C122.667 72.772 131.061 81.1667 141.417 81.1667Z" stroke="white" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"></path>
+<path d="M66.4166 124.917C76.772 124.917 85.1666 116.522 85.1666 106.167C85.1666 95.8113 76.772 87.4167 66.4166 87.4167C56.0613 87.4167 47.6666 95.8113 47.6666 106.167C47.6666 116.522 56.0613 124.917 66.4166 124.917Z" stroke="white" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"></path>
+<path d="M141.417 168.667C151.772 168.667 160.167 160.272 160.167 149.917C160.167 139.561 151.772 131.167 141.417 131.167C131.061 131.167 122.667 139.561 122.667 149.917C122.667 160.272 131.061 168.667 141.417 168.667Z" stroke="white" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"></path>
+<path d="M82.6042 115.604L125.292 140.479" stroke="white" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"></path>
+<path d="M125.229 71.8542L82.6042 96.7292" stroke="white" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"></path>
+</g><defs>
+<linearGradient id="paint0_linear_15_14" x1="0" y1="0" x2="213.333" y2="213.333" gradientUnits="userSpaceOnUse">
+<stop offset="0.0288462" stop-color="#23736B"></stop>
+<stop offset="0.265446" stop-color="#0BA07D"></stop>
+<stop offset="0.456731" stop-color="#14A789"></stop>
+<stop offset="0.82" stop-color="#047A83"></stop>
+</linearGradient>
+<clipPath id="clip0_15_14">
+<rect width="213" height="213" fill="white"></rect>
+</clipPath>
+</defs><style>@media (prefers-color-scheme: light) { :root { filter: none; } }
+@media (prefers-color-scheme: dark) { :root { filter: none; } }
+</style></svg>

@@ -176,7 +176,7 @@ const PowerPointPreview: React.FC<PowerPointPreviewProps> = ({ file }) => {
         }
     };
 
-    if (loading) return <div className="flex justify-center items-center h-full"><Loader2 className="w-8 h-8 animate-spin text-purple-500" /></div>;
+    if (loading) return <div className="flex justify-center items-center h-full"><Loader2 className="w-8 h-8 animate-spin text-primary-400" /></div>;
     if (error) return <div className="flex justify-center items-center h-full text-red-400">{error}</div>;
 
     return (
@@ -190,7 +190,7 @@ const PowerPointPreview: React.FC<PowerPointPreviewProps> = ({ file }) => {
                             key={slide.id}
                             onClick={() => scrollToSlide(idx)}
                             className={`w-full text-left p-3 rounded-lg text-sm transition flex items-center gap-3 outline-none ${activeSlide === idx
-                                    ? 'bg-purple-600/20 text-purple-300 border border-purple-600/30'
+                                    ? 'bg-primary/20 text-primary-200 border border-primary/30'
                                     : 'hover:bg-neutral-800 text-neutral-400 border border-transparent'
                                 }`}
                         >

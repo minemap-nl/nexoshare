@@ -20,7 +20,7 @@ const ImagePreview: React.FC<ImagePreviewProps> = ({ file }) => {
         }
     }, [file]);
 
-    if (!url) return <div className="flex justify-center items-center h-full"><Loader2 className="w-8 h-8 animate-spin text-purple-500" /></div>;
+    if (!url) return <div className="flex justify-center items-center h-full"><Loader2 className="w-8 h-8 animate-spin text-primary-400" /></div>;
 
     return (
         <div className="flex flex-col h-full w-full">

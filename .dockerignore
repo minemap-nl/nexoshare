@@ -21,6 +21,7 @@ logs
 
 # Negeer versiebeheer en IDE instellingen
 .git
+.git/
 .gitignore
 .vscode
 .idea
@@ -33,3 +34,4 @@ logs
 Dockerfile
 docker-compose.yml
 .dockerignore
+.cursor/

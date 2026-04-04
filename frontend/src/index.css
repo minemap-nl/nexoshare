@@ -2,7 +2,117 @@
 @tailwind components;
 @tailwind utilities;
 
+@layer base {
+  html {
+    @apply antialiased;
+  }
+  body {
+    @apply min-h-screen bg-app font-sans text-neutral-100;
+  }
+  button:not(:disabled),
+  [type='button']:not(:disabled),
+  [type='submit']:not(:disabled),
+  [type='reset']:not(:disabled) {
+    @apply cursor-pointer;
+  }
+  button:disabled,
+  [type='button']:disabled,
+  [type='submit']:disabled {
+    @apply cursor-not-allowed;
+  }
+}
+
+@layer components {
+  /* Forms */
+  .input-field {
+    @apply w-full min-w-0 rounded-lg border border-neutral-700 bg-black px-3 py-3 text-white transition-colors duration-200;
+    @apply placeholder:text-neutral-600;
+    @apply focus:border-primary-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-400/40 focus-visible:ring-offset-2 focus-visible:ring-offset-app;
+  }
+  .input-field--icon {
+    @apply py-2.5 pl-10 pr-4;
+  }
+  .select-field {
+    @apply w-full min-w-0 cursor-pointer appearance-none rounded-lg border border-neutral-700 bg-black py-2.5 pl-3 pr-8 text-white transition-colors duration-200;
+    @apply focus:border-primary-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-400/40 focus-visible:ring-offset-2 focus-visible:ring-offset-app;
+  }
+  .label-form {
+    @apply mb-2 block text-sm font-semibold text-neutral-400;
+  }
+  .label-form-compact {
+    @apply mb-1 block text-xs font-bold uppercase tracking-wide text-neutral-500;
+  }
+  /* Typography */
+  .heading-page {
+    @apply text-3xl font-bold tracking-tight text-white sm:text-4xl;
+  }
+  .heading-section {
+    @apply text-2xl font-bold tracking-tight text-white;
+  }
+  .heading-panel {
+    @apply text-xl font-bold tracking-tight text-white;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
 @layer utilities {
+  /** Brand gradient — stops: 3% #23736B, 27% #0BA07D, 46% #14A789, 82% #047A83 */
+  .bg-gradient-brand {
+    background-color: #23736b;
+    background-image: linear-gradient(
+      135deg,
+      #23736b 0%,
+      #23736b 3%,
+      #0ba07d 27%,
+      #14a789 46%,
+      #047a83 82%,
+      #047a83 100%
+    );
+    background-repeat: no-repeat;
+    background-size: 100% 100%;
+  }
+  .bg-gradient-brand-tr {
+    background-color: #23736b;
+    background-image: linear-gradient(
+      to top right,
+      #23736b 0%,
+      #23736b 3%,
+      #0ba07d 27%,
+      #14a789 46%,
+      #047a83 82%,
+      #047a83 100%
+    );
+    background-repeat: no-repeat;
+    background-size: 100% 100%;
+  }
+
+  /* Demo: server-enforced settings — no highlighting (legacy demo UX) */
+  .demo-server-locked,
+  .demo-server-locked input,
+  .demo-server-locked textarea,
+  .demo-server-locked select,
+  .demo-server-locked option {
+    user-select: none !important;
+    -webkit-user-select: none !important;
+    -moz-user-select: none !important;
+  }
+
+  .demo-server-locked .select-text,
+  .demo-server-locked .select-text * {
+    user-select: text !important;
+    -webkit-user-select: text !important;
+    -moz-user-select: text !important;
+  }
+
   .animate-shake {
     animation: shake 0.5s cubic-bezier(.36,.07,.19,.97) both;
   }

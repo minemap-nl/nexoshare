@@ -33,7 +33,7 @@ const VideoPreview: React.FC<VideoPreviewProps> = ({ file }) => {
         return () => window.removeEventListener('keydown', handleKeyDown);
     }, []);
 
-    if (!url) return <div className="flex justify-center items-center h-full"><Loader2 className="w-8 h-8 animate-spin text-purple-500" /></div>;
+    if (!url) return <div className="flex justify-center items-center h-full"><Loader2 className="w-8 h-8 animate-spin text-primary-400" /></div>;
 
     return (
         <div className="flex items-center justify-center h-full w-full bg-black rounded-xl overflow-hidden">

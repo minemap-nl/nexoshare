@@ -133,8 +133,8 @@ const FilePreviewModal: React.FC<FilePreviewProps> = ({ file, name, type, onClos
                 className="flex items-center justify-between p-4 border-b border-neutral-800 bg-neutral-900/80 backdrop-blur-md"
             >
                 <div className="flex items-center gap-3 overflow-hidden">
-                    <div className="bg-purple-600/20 p-2 rounded-lg">
-                        <FileText className="w-5 h-5 text-purple-400" />
+                    <div className="bg-primary/20 p-2 rounded-lg">
+                        <FileText className="w-5 h-5 text-primary-300" />
                     </div>
                     <h2 className="text-white font-medium truncate max-w-md md:max-w-xl">{name}</h2>
                 </div>

@@ -218,7 +218,7 @@ const PDFPreview: React.FC<PDFPreviewProps> = ({ file }) => {
         }
         return (
             <div className="flex flex-col justify-center items-center h-full gap-2 text-neutral-400">
-                <Loader2 className="w-8 h-8 animate-spin text-purple-500" />
+                <Loader2 className="w-8 h-8 animate-spin text-primary-400" />
                 <span className="text-sm">Loading PDF…</span>
             </div>
         );
