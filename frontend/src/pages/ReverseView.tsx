@@ -5,7 +5,7 @@ import { useParams } from 'react-router-dom';
 import {
     Download, Upload, File as FileIcon, Folder as FolderIcon, X, Check, Share2, Settings,
     LogOut, User, Shield,
-    Trash2, Send, AlertTriangle, Loader2, Info,
+    Trash2, Send, AlertTriangle, Loader2, Info, HelpCircle,
     XCircle, FileQuestion, CloudUpload, Eye,
     Copy, Plus, AlertCircle, ArrowRight, ChevronDown, Edit,
     Mail, Type, HardDrive, Calendar, MessageSquare, Globe,
@@ -49,6 +49,7 @@ import { Footer } from '../components/layout/Footer';
 import { ModalPortal } from '../components/ui/ModalPortal';
 import { CopyButton } from '../components/ui/CopyButton';
 import { Checkbox } from '../components/ui/Checkbox';
+import { Tooltip } from '../components/ui/Tooltip';
 import { ExtensionSelector } from '../components/ui/ExtensionSelector';
 
 
@@ -267,10 +268,13 @@ export function ReverseView({ active }: { active: boolean }) {
                                                 min="1"
                                                 className="input-field input-field--icon"
                                                 placeholder="Max Upload"
-                                                value={newShare.maxSizeVal}
+                                                value={newShare.maxSizeVal === '' ? '' : newShare.maxSizeVal}
                                                 onChange={e => {
                                                     const val = e.target.value;
-                                                    setNewShare({ ...newShare, maxSizeVal: val === '' ? 0 : parseInt(val) })
+                                                    setNewShare({ ...newShare, maxSizeVal: val === '' ? '' : parseInt(val) })
+                                                }}
+                                                onBlur={() => {
+                                                    if (newShare.maxSizeVal === '') setNewShare({ ...newShare, maxSizeVal: 1 });
                                                 }}
                                             />
                                         </div>
@@ -299,10 +303,13 @@ export function ReverseView({ active }: { active: boolean }) {
                                                 min="0"
                                                 className="input-field input-field--icon"
                                                 placeholder="0 = Never"
-                                                value={newShare.expirationVal}
+                                                value={newShare.expirationVal === '' ? '' : newShare.expirationVal}
                                                 onChange={e => {
                                                     const val = e.target.value;
-                                                    setNewShare({ ...newShare, expirationVal: val === '' ? 0 : parseInt(val) })
+                                                    setNewShare({ ...newShare, expirationVal: val === '' ? '' : parseInt(val) })
+                                                }}
+                                                onBlur={() => {
+                                                    if (newShare.expirationVal === '') setNewShare({ ...newShare, expirationVal: 0 });
                                                 }}
                                             />
                                         </div>
@@ -333,7 +340,12 @@ export function ReverseView({ active }: { active: boolean }) {
                                 <div className="md:col-span-2 grid grid-cols-1 md:grid-cols-2 gap-4">
                                     {/* Linkerkant: Email */}
                                     <div className="relative group">
-                                        <label className="label-form-compact ml-1">Recipient (Email)</label>
+                                        <label className="label-form-compact ml-1 flex items-center gap-2">
+                                            Recipient (Email)
+                                            <Tooltip content="Use commas to separate multiple email addresses.">
+                                                <HelpCircle className="w-3.5 h-3.5 text-neutral-500 cursor-help" />
+                                            </Tooltip>
+                                        </label>
                                         <div className="relative">
                                             <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-neutral-500 group-focus-within:text-primary-300 transition" />
                                             <input

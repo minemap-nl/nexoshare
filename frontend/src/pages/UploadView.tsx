@@ -5,7 +5,7 @@ import { useParams } from 'react-router-dom';
 import {
     Download, Upload, File as FileIcon, Folder as FolderIcon, X, Check, Share2, Settings,
     LogOut, User, Shield,
-    Trash2, Send, AlertTriangle, Loader2, Info,
+    Trash2, Send, AlertTriangle, Loader2, Info, HelpCircle,
     XCircle, FileQuestion, CloudUpload, Eye,
     Plus, AlertCircle, ArrowRight, ChevronDown, Edit,
     Mail, Type, HardDrive, Calendar, MessageSquare, Globe,
@@ -50,6 +50,7 @@ import { ModalPortal } from '../components/ui/ModalPortal';
 import { CopyButton } from '../components/ui/CopyButton';
 import { Checkbox } from '../components/ui/Checkbox';
 import { ExtensionSelector } from '../components/ui/ExtensionSelector';
+import { Tooltip } from '../components/ui/Tooltip';
 
 
 export type UploadViewProps = {
@@ -805,10 +806,13 @@ export function UploadView({ active, onUploadSurfaceChange, registerReset }: Upl
                                             <input
                                                 type="number" min="0"
                                                 className="input-field w-20 text-center"
-                                                value={options.expirationVal}
+                                                value={options.expirationVal === '' ? '' : options.expirationVal}
                                                 onChange={e => {
                                                     const val = e.target.value;
-                                                    setOpts({ ...options, expirationVal: val === '' ? 0 : parseInt(val) })
+                                                    setOpts({ ...options, expirationVal: val === '' ? '' : parseInt(val) })
+                                                }}
+                                                onBlur={() => {
+                                                    if (options.expirationVal === '') setOpts({ ...options, expirationVal: 0 });
                                                 }}
                                             />
                                             <div className="relative flex-1">
@@ -850,7 +854,12 @@ export function UploadView({ active, onUploadSurfaceChange, registerReset }: Upl
                                 </div>
 
                                 <div>
-                                    <label className="label-form-compact">Recipients</label>
+                                    <label className="label-form-compact flex items-center gap-2">
+                                        Recipients
+                                        <Tooltip content="Use commas to separate multiple email addresses.">
+                                            <HelpCircle className="w-3.5 h-3.5 text-neutral-500 cursor-help" />
+                                        </Tooltip>
+                                    </label>
                                     <input className="input-field" placeholder="dan@example.com..." value={options.recipients} onChange={e => setOpts({ ...options, recipients: e.target.value })} list="contacts" />
                                     <datalist id="contacts">{contacts.map(c => <option key={c.id} value={c.email} />)}</datalist>
                                 </div>

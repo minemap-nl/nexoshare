@@ -5,7 +5,7 @@ import { useParams } from 'react-router-dom';
 import {
     Download, Upload, File as FileIcon, Folder as FolderIcon, X, Check, Share2, Settings,
     LogOut, User, Shield,
-    Trash2, Send, AlertTriangle, Loader2, Info,
+    Trash2, Send, AlertTriangle, Loader2, Info, HelpCircle,
     XCircle, FileQuestion, CloudUpload, Eye,
     Copy, Plus, AlertCircle, ArrowRight, ChevronDown, Edit,
     Mail, Type, HardDrive, Calendar, MessageSquare, Globe,
@@ -50,6 +50,7 @@ import { ModalPortal } from '../components/ui/ModalPortal';
 import { CopyButton } from '../components/ui/CopyButton';
 import { Checkbox } from '../components/ui/Checkbox';
 import { ExtensionSelector } from '../components/ui/ExtensionSelector';
+import { Tooltip } from '../components/ui/Tooltip';
 
 
 export function MySharesView({ active }: { active: boolean }) {
@@ -471,15 +472,19 @@ export function MySharesView({ active }: { active: boolean }) {
                                             <input
                                                 type="number" min="0" placeholder="-"
                                                 className="input-field w-20 text-center"
-                                                value={editing.newExpirationVal ?? ''}
+                                                value={editing.newExpirationVal === '' ? '' : (editing.newExpirationVal ?? '')}
                                                 onChange={e => {
                                                     const val = e.target.value;
                                                     setEditing({
                                                         ...editing,
-                                                        // Als leeg, maak 0. Anders parseInt.
-                                                        newExpirationVal: val === '' ? 0 : parseInt(val),
+                                                        newExpirationVal: val === '' ? '' : parseInt(val),
                                                         newExpirationUnit: editing.newExpirationUnit || 'Days'
                                                     });
+                                                }}
+                                                onBlur={() => {
+                                                    if (editing.newExpirationVal === '') {
+                                                        setEditing({ ...editing, newExpirationVal: 0 });
+                                                    }
                                                 }}
                                             />
                                             <div className="relative flex-1">
@@ -673,7 +678,15 @@ export function MySharesView({ active }: { active: boolean }) {
                             >
                                 <h3 className="heading-panel mb-6 flex gap-2 items-center"><Mail className="text-primary-400" /> Resend mail</h3>
                                 <div className="space-y-4">
-                                    <div><label className="label-form-compact">Recipients</label><input className="input-field" value={resending.recipients || ''} onChange={e => setResending({ ...resending, recipients: e.target.value })} /></div>
+                                    <div>
+                                        <label className="label-form-compact flex items-center gap-2">
+                                            Recipients
+                                            <Tooltip content="Use commas to separate multiple email addresses.">
+                                                <HelpCircle className="w-3.5 h-3.5 text-neutral-500 cursor-help" />
+                                            </Tooltip>
+                                        </label>
+                                        <input className="input-field" value={resending.recipients || ''} onChange={e => setResending({ ...resending, recipients: e.target.value })} />
+                                    </div>
                                     <div><label className="label-form-compact">Message</label><textarea className="input-field" rows={4} value={resending.message || ''} onChange={e => setResending({ ...resending, message: e.target.value })} /></div>
                                 </div>
                                 <div className="flex justify-end gap-3 mt-6 border-t border-neutral-700 pt-4">

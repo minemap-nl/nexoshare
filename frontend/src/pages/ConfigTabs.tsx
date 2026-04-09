@@ -5,7 +5,7 @@ import { useParams } from 'react-router-dom';
 import {
     Download, Upload, File as FileIcon, Folder as FolderIcon, X, Check, Share2, Settings,
     LogOut, User, Shield,
-    Trash2, Send, AlertTriangle, Loader2, Info,
+    Trash2, Send, AlertTriangle, Loader2, Info, HelpCircle,
     XCircle, FileQuestion, CloudUpload, Eye,
     Copy, Plus, AlertCircle, ArrowRight, ChevronDown, Edit,
     Mail, Type, HardDrive, Calendar, MessageSquare, Globe,
@@ -50,6 +50,7 @@ import { ModalPortal } from '../components/ui/ModalPortal';
 import { CopyButton } from '../components/ui/CopyButton';
 import { Checkbox } from '../components/ui/Checkbox';
 import { ExtensionSelector } from '../components/ui/ExtensionSelector';
+import { Tooltip } from '../components/ui/Tooltip';
 
 /** Demo: informative banner + frozen, greyed panel (no focus, edit, or text selection). */
 function DemoServerLockedChrome({
@@ -651,7 +652,15 @@ MaxFileSize ${Math.ceil(inMB)}M`}
                             <div><label className="label-form">Port</label><input type="number" className="input-field" value={config.smtpPort || ''} onChange={e => setConfig({ ...config, smtpPort: parseInt(e.target.value) })} placeholder="465" /></div>
 
                             {/* Afzender Adres */}
-                            <div><label className="label-form">Sender (From)</label><input className="input-field" value={config.smtpFrom || ''} onChange={e => setConfig({ ...config, smtpFrom: e.target.value })} placeholder="noreply@domain.nl" /></div>
+                            <div>
+                                <label className="label-form flex items-center gap-2">
+                                    Sender (From)
+                                    <Tooltip content="Enter a name and email, e.g. 'Nexo Share <noreply@nexoshare.com>' (brackets are important)">
+                                        <HelpCircle className="w-4 h-4 text-neutral-500 cursor-help" />
+                                    </Tooltip>
+                                </label>
+                                <input className="input-field" value={config.smtpFrom || ''} onChange={e => setConfig({ ...config, smtpFrom: e.target.value })} placeholder="noreply@domain.nl" />
+                            </div>
 
                             <div><label className="label-form">Username</label><input className="input-field" value={config.smtpUser || ''} onChange={e => setConfig({ ...config, smtpUser: e.target.value })} placeholder="email@domain.nl" /></div>
 

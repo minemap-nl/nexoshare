@@ -206,7 +206,11 @@ export function LoginPage({ onLogin }: any) {
                 <div className="flex justify-center mb-8">
                     {(config.logoUrl && isValidHttpUrl(config.logoUrl)) ? <img src={config.logoUrl} className="h-16" alt="Logo" /> : <img src="/logo.svg" className="h-16" alt="Logo" />}
                 </div>
-                <h1 className="heading-page mb-6 text-center">Welcome to {config.appName || 'Nexo Share'}</h1>
+                <h1 className="heading-page mb-6 text-center leading-tight">
+                    Welcome to 
+                    {(config.appName || 'Nexo Share').length > 6 ? <br /> : ' '}
+                    <span className="whitespace-nowrap">{config.appName || 'Nexo Share'}</span>
+                </h1>
 
                 {!cfgLoading && config.demoMode && !twoFactorRequired && (
                     <div

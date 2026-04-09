@@ -82,7 +82,11 @@ export function SetupWizard({ onClose }: { onClose: () => void }) {
                                 {step === 4 ? <Check className="w-6 h-6" /> : <Sparkles className="w-6 h-6" />}
                             </div>
                             <div>
-                                <h2 className="heading-panel">Welcome to {config.appName || 'Nexo Share'}</h2>
+                                <h2 className="heading-panel leading-tight">
+                                    Welcome to 
+                                    {(config.appName || 'Nexo Share').length > 6 ? <br /> : ' '}
+                                    <span className="whitespace-nowrap">{config.appName || 'Nexo Share'}</span>
+                                </h2>
                                 <p className="text-sm text-neutral-400">First installation setup {step > 0 && `(${step}/3)`}</p>
                             </div>
                         </div>

@@ -60,7 +60,7 @@ const reverseShareSchema = z.object({
     expirationUnit: z.string().optional(),
     password: z.string().max(255).optional(),
     notify: z.boolean(),
-    sendEmailTo: z.string().email('Invalid email address').optional().or(z.literal('')),
+    sendEmailTo: z.string().max(2000).optional().or(z.literal('')),
     thankYouMessage: z.string().max(1000).optional(),
     customSlug: z.string().max(50).optional()
 });
@@ -241,8 +241,8 @@ cron.schedule('0 * * * *', async () => {
         // 2. Verwijder uit database (Cascade verwijdert ook de file-records)
         await client.query(`DELETE FROM shares WHERE expires_at IS NOT NULL AND expires_at < NOW()`);
 
-        // 3. Zelfde voor reverse shares (hoewel die vaak geen map hebben, maar wel records)
-        await client.query(`DELETE FROM reverse_shares WHERE expires_at IS NOT NULL AND expires_at < NOW()`);
+        // 3. Reverse shares are explicitly NOT deleted by cron so they only stop accepting uploads.
+
 
         // 4. Cleanup sso tokens
         await pool.query('DELETE FROM sso_tokens WHERE expires_at < NOW()');
@@ -1073,7 +1073,8 @@ async function sendEmail(to: string, subject: string, rawMessage: string, ctaLin
 
         // Gebruik smtpFrom als die is ingesteld, anders smtpUser
         const fromEmail = config.smtpFrom || config.smtpUser;
-        await transporter.sendMail({ from: `"${safeHeaderAppName}" <${fromEmail}>`, to, subject, html });
+        const fromHeader = fromEmail.includes('<') ? fromEmail : `"${safeHeaderAppName}" <${fromEmail}>`;
+        await transporter.sendMail({ from: fromHeader, to, subject, html });
         return true;
     } catch (e: any) {
         // Log the SPECIFIC error to the server console so you can see it
@@ -1933,9 +1934,9 @@ apiRouter.post('/auth/password-reset/request', passwordResetLimiter, async (req,
         );
 
         res.json({ success: true });
-    } catch (e) {
-        console.error(e);
-        res.status(500).json({ error: 'Request failed' });
+    } catch (e: any) {
+        console.error('Password reset request failed:', e);
+        res.status(500).json({ error: e.message || 'Request failed' });
     }
 });
 
@@ -2474,7 +2475,7 @@ apiRouter.post('/config/test-email', async (req, res) => {
 
         const config = await getConfig();
         await transporter.sendMail({
-            from: `"${config.appName || 'Nexo Share'}" <${smtpFrom || smtpUser}>`,
+            from: (smtpFrom || smtpUser).includes('<') ? (smtpFrom || smtpUser) : `"${config.appName || 'Nexo Share'}" <${smtpFrom || smtpUser}>`,
             to: testEmail,
             subject: `Test Email from ${config.appName || 'Nexo Share'}`,
             html: `<div style="font-family: sans-serif; padding: 20px; background: #f3f4f6; border-radius: 8px;">
@@ -2846,8 +2847,8 @@ apiRouter.post('/shares/init', authenticateToken, uploadLimiter, handleUploadId,
 
         res.json({ success: true, shareId });
     } catch (e: any) {
-        console.error(e);
-        res.status(500).json({ error: 'Init failed' });
+        console.error('Init failed:', e);
+        res.status(500).json({ error: e.message || 'Initialization failed' });
     } finally {
         client.release();
     }
@@ -3398,7 +3399,7 @@ apiRouter.post('/shares/:id/resend', authenticateToken, async (req, res) => {
             for (const email of list) await sendEmail(email, 'Reminder: Files received', `<p><strong>${escapeHtml(authReq.user!.email)}</strong> sent the link again.</p><div class="message-box" style="background: #f3f4f6; padding: 15px; border-radius: 8px; margin: 20px 0; color: #4b5563;">${message ? escapeHtml(message).replace(/\n/g, '<br>') : 'Here is the link.'}</div>`, shareUrl, 'Download Files');
         } catch (e: any) {
             console.error("Resend email failed:", e.message);
-            return res.status(500).json({ error: 'Failed to send emails. Check server logs.' });
+            res.status(500).json({ error: e.message || 'Failed to resend email' });
         }
     }
     res.json({ success: true });
@@ -3807,11 +3808,12 @@ apiRouter.post('/reverse', authenticateToken, async (req, res) => {
         const link = `${baseUrl}/r/${id}`;
         if (sendEmailTo) { await sendEmail(sendEmailTo, 'Upload Request', `<strong>${escapeHtml(authReq.user!.email)}</strong> invited you to upload files.`, link, 'Upload Files'); }
         res.json({ success: true, url: link });
-    } catch (e) {
+    } catch (e: any) {
         if (e instanceof z.ZodError) {
             return res.status(400).json({ error: e.issues[0].message });
         }
-        res.status(500).json({ error: 'Server error' });
+        console.error('Reverse Share creation failed:', e);
+        res.status(500).json({ error: e.message || 'Server error' });
     }
 });
 
