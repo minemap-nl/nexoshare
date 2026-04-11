@@ -33,6 +33,7 @@ export function GuestUploadPage() {
     const { config: guestCfg } = useAppConfig();
     const [files, setFiles] = useState<UploadItem[]>([]);
     const [uploading, setUploading] = useState(false);
+    const [finalizing, setFinalizing] = useState(false);
     const [success, setSuccess] = useState(false);
     const [progress, setProgress] = useState(0);
     const fileInputRef = useRef<HTMLInputElement>(null);
@@ -217,6 +218,7 @@ export function GuestUploadPage() {
             }
 
             setProgress(99);
+            setFinalizing(true);
             
             if (uploadedFilesMeta.length === 0) {
                 setFiles([]);
@@ -225,6 +227,7 @@ export function GuestUploadPage() {
             }
             
             await axios.post(`${API_URL}/public/reverse/${id}/finalize`, { files: uploadedFilesMeta });
+            setFinalizing(false);
             setSuccess(true);
 
         } catch (e: any) {
@@ -239,6 +242,7 @@ export function GuestUploadPage() {
             delete (window as any).__uploadAbortController;
             delete (window as any).__uploading;
             setUploading(false);
+            setFinalizing(false);
             setProgress(0);
             setFiles(prev => prev.map(f => ({ ...f, cancelled: false, uploadProgress: 0 })));
         }
@@ -321,7 +325,7 @@ export function GuestUploadPage() {
                         }} />
 
                         <div
-                            className="isolate group relative flex flex-col items-center justify-center overflow-hidden rounded-2xl bg-neutral-900 md:p-10 min-h-[250px] md:min-h-[300px] outline-none focus-visible:outline-none [transform:translateZ(0)] [backface-visibility:hidden]"
+                            className="isolate group relative flex flex-col items-center justify-center overflow-hidden rounded-2xl bg-neutral-900 p-8 md:p-10 min-h-[250px] md:min-h-[300px] outline-none focus-visible:outline-none [transform:translateZ(0)] [backface-visibility:hidden]"
                             onDragOver={e => e.preventDefault()}
                             onDrop={handleDrop}
                         >
@@ -338,12 +342,12 @@ export function GuestUploadPage() {
                                 <p className="text-neutral-400 text-sm max-w-xs mx-auto mb-6">or click to browse from your computer</p>
                             </div>
 
-                            <div className="relative z-20 flex gap-3 mt-0 pointer-events-auto">
+                            <div className="relative z-20 flex gap-3 mt-0 pb-6 pointer-events-auto">
                                 <button onClick={(e) => { e.stopPropagation(); fileInputRef.current?.click(); }} className="text-xs bg-neutral-800 hover:bg-neutral-700 text-white px-3 py-2 rounded-lg transition border border-neutral-700 cursor-pointer hover:border-primary-400">Select Files</button>
                                 <button onClick={(e) => { e.stopPropagation(); onPickFolder(); }} className="text-xs bg-neutral-800 hover:bg-neutral-700 text-white px-3 py-2 rounded-lg transition border border-neutral-700 flex items-center gap-2 cursor-pointer hover:border-primary-400"><FolderIcon className="w-3 h-3" /> Select Folder</button>
                             </div>
                             {info.maxSize && (
-                                <div className="mt-4 px-3 py-1 rounded-full bg-neutral-800 border border-neutral-700 text-xs text-neutral-400 font-medium">
+                                <div className="mt-0 px-3 py-1 rounded-full bg-neutral-800 border border-neutral-700 text-xs text-neutral-400 font-medium group-hover:border-primary-400/30 group-hover:text-primary-200 mb-4 md:mb-0">
                                     Max size: {formatBytes(info.maxSize)}
                                 </div>
                             )}
@@ -407,13 +411,31 @@ export function GuestUploadPage() {
                         )}
 
                         {uploading && (
-                            <div className="w-full bg-neutral-800 rounded-full h-2.5 overflow-hidden">
-                                <div className="bg-green-500 h-2.5 rounded-full transition-all duration-300" style={{ width: `${progress}%` }}></div>
+                            <div className="w-full">
+                                <div className="flex justify-between items-end mb-2">
+                                    <div className="text-left text-[10px] font-bold text-white uppercase tracking-wider">
+                                        {finalizing ? 'Finalizing & Scanning...' : 'Uploading...'}
+                                    </div>
+                                    <div className="text-right text-[10px] text-neutral-500 font-bold tabular-nums">
+                                        {progress}%
+                                    </div>
+                                </div>
+                                <div className="w-full bg-neutral-800 rounded-full h-2.5 overflow-hidden border border-neutral-700 p-0.5">
+                                    <div 
+                                        className={`h-full rounded-full transition-all duration-300 relative ${finalizing ? 'bg-primary-500 w-full animate-pulse' : 'bg-green-500'}`} 
+                                        style={{ width: finalizing ? '100%' : `${progress}%` }}
+                                    >
+                                        {finalizing && <div className="absolute inset-0 animate-scan rounded-full" />}
+                                    </div>
+                                </div>
+                                {finalizing && (
+                                    <p className="text-[10px] text-neutral-500 mt-1.5 text-center">Server is assembling files and checking for viruses. Please wait.</p>
+                                )}
                             </div>
                         )}
 
                         <button onClick={handleUpload} disabled={uploading || files.length === 0} className="w-full bg-green-600 hover:bg-green-700 text-white p-3 rounded-lg font-bold disabled:bg-neutral-800 transition btn-press shadow-lg">
-                            {uploading ? `In progress (${progress}%)...` : `Send ${files.length} files`}
+                            {finalizing ? "Processing..." : uploading ? `Uploading (${progress}%)...` : `Send ${files.length} files`}
                         </button>
                     </div>
                 )}

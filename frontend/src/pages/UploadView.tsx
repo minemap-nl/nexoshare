@@ -62,6 +62,7 @@ export type UploadViewProps = {
 export function UploadView({ active, onUploadSurfaceChange, registerReset }: UploadViewProps) {
     const [files, setFiles] = useState<UploadItem[]>([]);
     const [uploading, setUploading] = useState(false);
+    const [finalizing, setFinalizing] = useState(false);
     const [uploadProgress, setUploadProgress] = useState(0);
     const [result, setResult] = useState<any>(null);
     const [showSettings, setShowSettings] = useState(false);
@@ -437,9 +438,11 @@ export function UploadView({ active, onUploadSurfaceChange, registerReset }: Upl
                 return;
             }
 
+            setFinalizing(true);
             const finalRes = await axios.post(`${API_URL}/shares/${shareId}/finalize`, {
                 files: uploadedFilesMeta
             });
+            setFinalizing(false);
 
             if (finalRes.data.success) {
                 setResult(finalRes.data);
@@ -485,6 +488,7 @@ export function UploadView({ active, onUploadSurfaceChange, registerReset }: Upl
             delete (window as any).__uploadAbortController;
             delete (window as any).__uploading;
             setUploading(false);
+            setFinalizing(false);
             setUploadProgress(0);
             setFiles(prev => {
                 const next = prev.map(f => ({ ...f, cancelled: false, uploadProgress: 0 }));
@@ -599,7 +603,7 @@ export function UploadView({ active, onUploadSurfaceChange, registerReset }: Upl
         <div className="relative">
             {!uploading && (
             <div
-                className="isolate group relative flex flex-col items-center justify-center overflow-hidden rounded-2xl bg-neutral-900 md:p-10 min-h-[250px] md:min-h-[300px] outline-none focus-visible:outline-none [transform:translateZ(0)] [backface-visibility:hidden]"
+                className="isolate group relative flex flex-col items-center justify-center overflow-hidden rounded-2xl bg-neutral-900 p-8 md:p-10 min-h-[250px] md:min-h-[300px] outline-none focus-visible:outline-none [transform:translateZ(0)] [backface-visibility:hidden]"
                 onDragOver={e => e.preventDefault()}
                 onDrop={handleDrop}
             >
@@ -725,11 +729,13 @@ export function UploadView({ active, onUploadSurfaceChange, registerReset }: Upl
                     {uploading && (
                         <div className="px-4 py-3 bg-black border-t border-neutral-800">
                             <div className="flex justify-between text-xs text-neutral-400 mb-1">
-                                <span>Uploading...</span>
+                                <span>{finalizing ? 'Finalizing...' : 'Uploading...'}</span>
                                 <span>{uploadProgress}%</span>
                             </div>
                             <div className="w-full bg-neutral-800 rounded-full h-2 overflow-hidden">
-                                <div className="bg-gradient-to-r from-primary to-primary-300 h-2 rounded-full transition-all duration-300" style={{ width: `${uploadProgress}%` }}></div>
+                                <div className={`h-2 rounded-full transition-all duration-300 relative ${finalizing ? 'bg-primary w-full animate-pulse' : 'bg-gradient-to-r from-primary to-primary-300'}`} style={{ width: finalizing ? '100%' : `${uploadProgress}%` }}>
+                                    {finalizing && <div className="absolute inset-0 animate-scan rounded-full" />}
+                                </div>
                             </div>
                         </div>
                     )}
@@ -737,7 +743,7 @@ export function UploadView({ active, onUploadSurfaceChange, registerReset }: Upl
                     <div className="p-4 bg-neutral-900/90 border-t border-neutral-800 flex justify-end">
                         <button onClick={() => setShowSettings(true)} disabled={uploading} className="bg-gradient-brand hover:brightness-90 text-white px-8 py-3 rounded-xl font-bold shadow-lg shadow-primary-950/25 transition-all btn-press flex items-center gap-2 text-lg">
                             {uploading ? <Loader2 className="w-5 h-5 animate-spin" /> : <ArrowRight className="w-5 h-5" />}
-                            {uploading ? 'In progress...' : 'Share'}
+                            {finalizing ? 'Processing...' : uploading ? 'In progress...' : 'Share'}
                         </button>
                     </div>
                 </div>
@@ -866,7 +872,7 @@ export function UploadView({ active, onUploadSurfaceChange, registerReset }: Upl
 
                                 <div className="flex justify-end gap-3 pt-4 border-t border-neutral-800">
                                     <button onClick={() => setShowSettings(false)} className="text-neutral-400 hover:text-white px-4 py-2 transition">Cancel</button>
-                                    <button onClick={handleUpload} disabled={uploading} className="bg-gradient-brand hover:brightness-90 px-8 py-3 rounded-lg text-white font-bold transition btn-press shadow-lg shadow-primary-950/25">{uploading ? 'In progress...' : 'Send'}</button>
+                                    <button onClick={handleUpload} disabled={uploading} className="bg-gradient-brand hover:brightness-90 px-8 py-3 rounded-lg text-white font-bold transition btn-press shadow-lg shadow-primary-950/25">{finalizing ? 'Processing...' : uploading ? 'In progress...' : 'Send'}</button>
                                 </div>
                             </motion.div>
                         </motion.div>

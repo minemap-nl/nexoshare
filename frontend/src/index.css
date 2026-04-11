@@ -116,11 +116,22 @@
   .animate-shake {
     animation: shake 0.5s cubic-bezier(.36,.07,.19,.97) both;
   }
-  
+
   @keyframes shake {
     10%, 90% { transform: translate3d(-1px, 0, 0); }
     20%, 80% { transform: translate3d(2px, 0, 0); }
     30%, 50%, 70% { transform: translate3d(-4px, 0, 0); }
     40%, 60% { transform: translate3d(4px, 0, 0); }
+  }
+
+  .animate-scan {
+    animation: scan 1.5s linear infinite;
+    background: linear-gradient(to right, transparent, rgba(255,255,255,0.4), transparent);
+    background-size: 200% 100%;
+  }
+
+  @keyframes scan {
+    0% { background-position: -200% 0; }
+    100% { background-position: 200% 0; }
   }
 }

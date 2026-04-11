@@ -5004,13 +5004,16 @@ async function initDB() {
                         "name": appName,
                         "short_name": appName,
                         "icons": [
-                            { "src": "/pwa-192x192.png", "sizes": "192x192", "type": "image/png" },
-                            { "src": "/pwa-512x512.png", "sizes": "512x512", "type": "image/png" }
+                            { "src": "/favicon-96x96.png", "sizes": "96x96", "type": "image/png" },
+                            { "src": "/pwa-192x192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+                            { "src": "/pwa-192x192.png", "sizes": "192x192", "type": "image/png", "purpose": "maskable" },
+                            { "src": "/pwa-512x512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+                            { "src": "/pwa-512x512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
                         ],
                         "start_url": "/",
                         "display": "standalone",
-                        "background_color": "#000000",
-                        "theme_color": "#000000"
+                        "background_color": "#09090b",
+                        "theme_color": "#09090b"
                     });
                 });
 
