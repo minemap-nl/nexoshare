@@ -2319,6 +2319,12 @@ apiRouter.get('/config', async (req, res) => {
             ...(DEMO_MODE ? { demoDataRetentionMinutes: DEMO_RETENTION_MINUTES, demoMaxFileMb: DEMO_MAX_FILE_MB } : {})
         };
 
+        const authConfig = {
+            ...publicConfig,
+            clamavEnabled: !!clamscanInstance,
+            clamavMustScan: isClamavScanEnforced(config)
+        };
+
         const cookies = parseCookies(req);
         const token = cookies.token || (authReq.headers['authorization'] && authReq.headers['authorization'].split(' ')[1]);
 
@@ -2331,6 +2337,8 @@ apiRouter.get('/config', async (req, res) => {
                 const safeConfig = {
                     ...config,
                     demoMode: DEMO_MODE,
+                    clamavEnabled: !!clamscanInstance,
+                    clamavMustScan: isClamavScanEnforced(config),
                     ...(DEMO_MODE ? { demoDataRetentionMinutes: DEMO_RETENTION_MINUTES, demoMaxFileMb: DEMO_MAX_FILE_MB } : {})
                 };
                 if (safeConfig.smtpPass) safeConfig.smtpPass = '********';
@@ -2338,7 +2346,7 @@ apiRouter.get('/config', async (req, res) => {
 
                 res.json(safeConfig);
             } else {
-                res.json(publicConfig);
+                res.json(authConfig);
             }
         });
     } catch (e) { res.status(500).json({ error: 'Config error' }); }

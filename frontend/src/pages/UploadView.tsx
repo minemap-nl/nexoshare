@@ -729,7 +729,7 @@ export function UploadView({ active, onUploadSurfaceChange, registerReset }: Upl
                     {uploading && (
                         <div className="px-4 py-3 bg-black border-t border-neutral-800">
                             <div className="flex justify-between text-xs text-neutral-400 mb-1">
-                                <span>{finalizing ? 'Finalizing...' : 'Uploading...'}</span>
+                                <span>{finalizing ? (appCfg?.clamavEnabled ? 'Finalizing & Scanning...' : 'Assembling files...') : 'Uploading...'}</span>
                                 <span>{uploadProgress}%</span>
                             </div>
                             <div className="w-full bg-neutral-800 rounded-full h-2 overflow-hidden">
@@ -737,13 +737,18 @@ export function UploadView({ active, onUploadSurfaceChange, registerReset }: Upl
                                     {finalizing && <div className="absolute inset-0 animate-scan rounded-full" />}
                                 </div>
                             </div>
+                            {finalizing && (
+                                <p className="text-[10px] text-neutral-500 mt-1.5 text-center">
+                                    Server is assembling files{appCfg?.clamavEnabled ? ' and checking for viruses' : ''}. Please wait.
+                                </p>
+                            )}
                         </div>
                     )}
 
                     <div className="p-4 bg-neutral-900/90 border-t border-neutral-800 flex justify-end">
                         <button onClick={() => setShowSettings(true)} disabled={uploading} className="bg-gradient-brand hover:brightness-90 text-white px-8 py-3 rounded-xl font-bold shadow-lg shadow-primary-950/25 transition-all btn-press flex items-center gap-2 text-lg">
                             {uploading ? <Loader2 className="w-5 h-5 animate-spin" /> : <ArrowRight className="w-5 h-5" />}
-                            {finalizing ? 'Processing...' : uploading ? 'In progress...' : 'Share'}
+                            {finalizing ? (appCfg?.clamavEnabled ? 'Scanning...' : 'Processing...') : uploading ? 'In progress...' : 'Share'}
                         </button>
                     </div>
                 </div>
