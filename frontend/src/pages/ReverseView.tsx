@@ -61,9 +61,9 @@ export function ReverseView({ active }: { active: boolean }) {
     // Update state met expirationVal en expirationUnit (Default: 1 Week)
     const [newShare, setNewShare] = useState({
         name: '',
-        maxSizeVal: 1, // Standaard 1
+        maxSizeVal: 1 as number | '', // Standaard 1
         maxSizeUnit: 'GB', // Standaard GB
-        expirationVal: 1,
+        expirationVal: 1 as number | '',
         expirationUnit: 'Weeks',
         password: '',
         notify: true,
@@ -331,7 +331,7 @@ export function ReverseView({ active }: { active: boolean }) {
                                         <Info className="w-3 h-3" />
                                         {!newShare.expirationVal || newShare.expirationVal === 0
                                             ? "Never expires (Optional)"
-                                            : <span>Expires on: <span className="text-primary-300">{getFutureDate(newShare.expirationVal, newShare.expirationUnit)}</span></span>
+                                            : <span>Expires on: <span className="text-primary-300">{getFutureDate(Number(newShare.expirationVal), newShare.expirationUnit)}</span></span>
                                         }
                                     </p>
                                 </div>

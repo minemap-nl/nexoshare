@@ -68,7 +68,7 @@ export function UploadView({ active, onUploadSurfaceChange, registerReset }: Upl
     const [showSettings, setShowSettings] = useState(false);
     const [options, setOpts] = useState({
         name: '', password: '', recipients: '', message: '', customSlug: '',
-        expirationVal: 1, expirationUnit: 'Weeks',
+        expirationVal: 1 as number | '', expirationUnit: 'Weeks',
         maxDownloads: undefined as number | undefined
     });
     const [idLength, setIdLength] = useState(12);
@@ -829,7 +829,7 @@ export function UploadView({ active, onUploadSurfaceChange, registerReset }: Upl
                                                 >
                                                     {UNITS.map(u => (
                                                         <option key={u} value={u}>
-                                                            {getUnitLabel(options.expirationVal, u)}
+                                                            {getUnitLabel(Number(options.expirationVal), u)}
                                                         </option>
                                                     ))}
                                                 </select>
@@ -838,8 +838,8 @@ export function UploadView({ active, onUploadSurfaceChange, registerReset }: Upl
                                         </div>
                                         <div className="text-[10px] text-neutral-500 mt-1.5 flex items-center gap-1.5">
                                             <Info className="w-3 h-3" />
-                                            {options.expirationVal > 0
-                                                ? <span>Expires on: <span className="text-primary-300">{getFutureDate(options.expirationVal, options.expirationUnit, locale)}</span></span>
+                                            {Number(options.expirationVal) > 0
+                                                ? <span>Expires on: <span className="text-primary-300">{getFutureDate(Number(options.expirationVal), options.expirationUnit, locale)}</span></span>
                                                 : <span>Link <span className="text-green-500">always remains valid</span></span>
                                             }
                                         </div>
