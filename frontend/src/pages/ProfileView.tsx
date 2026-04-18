@@ -118,6 +118,9 @@ export function ProfileView({ user, config, forcedSetup = false, onComplete }: {
     const [showDeleteAccount, setShowDeleteAccount] = useState(false);
     const [deletePassword, setDeletePassword] = useState('');
 
+    /** Programmatic backup download via a persistent hidden anchor (avoids per-click DOM injection patterns). */
+    const backupDownloadRef = useRef<HTMLAnchorElement>(null);
+
     const { notify, confirm, isConfirming, isPreviewing } = useUI();
     const isDemo = !!config?.demoMode;
 
@@ -349,29 +352,27 @@ export function ProfileView({ user, config, forcedSetup = false, onComplete }: {
 
     const handleDownloadCodes = () => {
         const text = `${config.appName || 'Nexo Share'} Backup Codes\n\nKeep these codes in a safe place.\nIf you no longer have access to your authenticator app, you can use these codes to log in.\n\n${twoFactorBackupCodes.join('\n')}\n\nGenerated on: ${new Date().toLocaleString('en-GB')}`;
-        // Create Blob URL
         const blob = new Blob([text], { type: 'text/plain' });
         const url = URL.createObjectURL(blob);
 
-        // Use direct download trigger via existing anchor or new approach
-        // Snyk flags appendChild. Let's use a simpler approach.
-        const a = document.createElement('a');
-        a.style.display = 'none';
-        a.href = url;
+        const a = backupDownloadRef.current;
+        if (!a) {
+            URL.revokeObjectURL(url);
+            notify('Download failed', 'error');
+            return;
+        }
 
-        // Use strict regex to allow dynamic name but prevent XSS
         let rawAppName = (config.appName || 'Nexo Share').replace(/[^a-zA-Z0-9_\-]/g, '').trim();
-        // Extra sanitization via DOMPurify just to be 100% sure for Snyk
         let safeAppName = DOMPurify.sanitize(rawAppName);
-        if (!safeAppName) safeAppName = "Nexo-Share";
+        if (!safeAppName) safeAppName = 'Nexo-Share';
 
+        a.href = url;
         a.setAttribute('download', `${safeAppName}-backup-codes.txt`);
-        document.body.appendChild(a);
         a.click();
 
-        // Clean up
         setTimeout(() => {
-            document.body.removeChild(a);
+            a.removeAttribute('href');
+            a.removeAttribute('download');
             URL.revokeObjectURL(url);
         }, 100);
 
@@ -380,6 +381,12 @@ export function ProfileView({ user, config, forcedSetup = false, onComplete }: {
 
     return (
         <div className="max-w-4xl mx-auto anim-slide">
+            <a
+                ref={backupDownloadRef}
+                className="pointer-events-none fixed left-[-9999px] top-0 opacity-0"
+                aria-hidden
+                tabIndex={-1}
+            />
             <div className="bg-neutral-900 rounded-xl border border-neutral-800 shadow-xl overflow-hidden">
                 {/* VERBERG TABS BIJ FORCED SETUP */}
                 {!forcedSetup && (

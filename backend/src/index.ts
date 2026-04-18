@@ -25,6 +25,7 @@ import {
 } from '@simplewebauthn/server';
 import validator from 'validator';
 import rateLimit from 'express-rate-limit';
+import { isPathUnderDir, isResolvedPathInsideDir, safeUploadBaseName } from './lib/uploadPathPolicy';
 
 dotenv.config();
 
@@ -1028,6 +1029,44 @@ const isStrongPassword = (password: string): { valid: boolean; error?: string } 
     return { valid: true };
 };
 
+/**
+ * Shared SMTP transport options. Explicit timeouts avoid flaky "Greeting never received" / ETIMEDOUT
+ * on slower networks and align behaviour across Nodemailer major versions.
+ */
+function createSmtpTransportOptions(opts: {
+    host: string;
+    port: number;
+    secure: boolean;
+    auth: { user: string; pass: string };
+}) {
+    return {
+        host: opts.host,
+        port: opts.port,
+        secure: opts.secure,
+        auth: opts.auth,
+        tls: { rejectUnauthorized: false },
+        connectionTimeout: 25_000,
+        greetingTimeout: 20_000,
+        socketTimeout: 60_000,
+    };
+}
+
+function humanizeSmtpError(err: unknown): string {
+    const e = err as { message?: string; code?: string };
+    const msg = String(e?.message || err || '').toLowerCase();
+    const code = String(e?.code || '');
+    if (msg.includes('greeting never received') || code === 'ETIMEDOUT' || msg.includes('timeout') || msg.includes('econnrefused')) {
+        return (
+            'Could not complete the SMTP connection (timeout or no server greeting). Check host and port, firewall/VPN, ' +
+            'and that TLS matches the port (common: port 465 with TLS on, or port 587 with TLS off for STARTTLS).'
+        );
+    }
+    if (msg.includes('invalid login') || msg.includes('authentication failed') || msg.includes('535')) {
+        return 'SMTP authentication failed. Check username and password.';
+    }
+    return typeof e?.message === 'string' && e.message.length > 0 ? e.message : 'Could not send email';
+}
+
 /** Returns true only when mail was actually handed to SMTP (not skipped: no SMTP, invalid address). */
 async function sendEmail(to: string, subject: string, rawMessage: string, ctaLink?: string, ctaText?: string): Promise<boolean> {
     if (DEMO_MODE) {
@@ -1045,13 +1084,14 @@ async function sendEmail(to: string, subject: string, rawMessage: string, ctaLin
     const safeSubject = sanitizeEmailHeader(subject);
 
     try {
-        const transporter = nodemailer.createTransport({
-            host: config.smtpHost,
-            port: parseInt(config.smtpPort) || 465,
-            secure: config.smtpSecure || false,
-            auth: { user: config.smtpUser, pass: config.smtpPass },
-            tls: { rejectUnauthorized: false }
-        });
+        const transporter = nodemailer.createTransport(
+            createSmtpTransportOptions({
+                host: config.smtpHost,
+                port: parseInt(String(config.smtpPort), 10) || 465,
+                secure: !!config.smtpSecure,
+                auth: { user: config.smtpUser, pass: config.smtpPass },
+            })
+        );
 
         const appName = config.appName || 'Nexo Share';
         // Sanitize de naam voor gebruik in headers om injection te voorkomen
@@ -2463,9 +2503,19 @@ apiRouter.post('/config/test-email', async (req, res) => {
     if (!await checkConfigPermission(req, res)) return;
     try {
         const { smtpHost, smtpPort, smtpUser, smtpPass, smtpSecure, testEmail, smtpFrom, smtpAllowLocal } = req.body;
-        if (!testEmail) return res.status(400).json({ error: 'No test email address provided' });
+        if (!testEmail || typeof testEmail !== 'string') return res.status(400).json({ error: 'No test email address provided' });
 
-        if (!smtpAllowLocal && isPrivateIP(smtpHost)) {
+        const smtpHostStr = typeof smtpHost === 'string' ? smtpHost : '';
+        const smtpUserStr = typeof smtpUser === 'string' ? smtpUser : '';
+        const smtpFromStr = typeof smtpFrom === 'string' ? smtpFrom : '';
+        const smtpPortNum = typeof smtpPort === 'number' && Number.isFinite(smtpPort)
+            ? smtpPort
+            : parseInt(typeof smtpPort === 'string' ? smtpPort : '', 10);
+        if (!Number.isFinite(smtpPortNum) || smtpPortNum < 1 || smtpPortNum > 65535) {
+            return res.status(400).json({ error: 'Invalid SMTP port' });
+        }
+
+        if (!smtpAllowLocal && isPrivateIP(smtpHostStr)) {
             return res.status(403).json({ error: 'Internal/Local IPs are blocked. Enable "Allow Local IPs" in settings if this is intentional.' });
         }
 
@@ -2475,15 +2525,19 @@ apiRouter.post('/config/test-email', async (req, res) => {
             finalPass = currentConfig.smtpPass;
         }
 
-        const transporter = nodemailer.createTransport({
-            host: smtpHost, port: parseInt(smtpPort), secure: smtpSecure,
-            auth: { user: smtpUser, pass: finalPass },
-            tls: { rejectUnauthorized: false }
-        });
+        const transporter = nodemailer.createTransport(
+            createSmtpTransportOptions({
+                host: smtpHostStr,
+                port: smtpPortNum,
+                secure: !!smtpSecure,
+                auth: { user: smtpUserStr, pass: finalPass },
+            })
+        );
 
         const config = await getConfig();
+        const fromAddr = smtpFromStr || smtpUserStr;
         await transporter.sendMail({
-            from: (smtpFrom || smtpUser).includes('<') ? (smtpFrom || smtpUser) : `"${config.appName || 'Nexo Share'}" <${smtpFrom || smtpUser}>`,
+            from: fromAddr.includes('<') ? fromAddr : `"${config.appName || 'Nexo Share'}" <${fromAddr}>`,
             to: testEmail,
             subject: `Test Email from ${config.appName || 'Nexo Share'}`,
             html: `<div style="font-family: sans-serif; padding: 20px; background: #f3f4f6; border-radius: 8px;">
@@ -2493,8 +2547,11 @@ apiRouter.post('/config/test-email', async (req, res) => {
         });
         res.json({ success: true });
     } catch (e: any) {
-        console.error("Test email error:", e);
-        res.status(500).json({ error: e.message || 'Could not send email' });
+        console.error('Test email error:', e);
+        const clientMsg = humanizeSmtpError(e);
+        const raw = String(e?.message || '');
+        const isAuthFail = /535|authentication failed|invalid credentials|bad username or password|invalid login/i.test(raw);
+        res.status(isAuthFail ? 401 : 502).json({ error: clientMsg });
     }
 });
 
@@ -2937,9 +2994,19 @@ apiRouter.post('/shares/:id/chunk', authenticateToken, uploadLimiter, chunkUploa
 
     if (!req.file) return res.status(400).json({ error: 'No data' });
 
+    if (!isPathUnderDir(TEMP_DIR, req.file.path)) {
+        await safeUnlink(req.file.path);
+        return res.status(400).json({ error: 'Invalid upload path' });
+    }
+
     // UNIEKE NAAM: Opslaan als .part bestand (één bestand dat groeit)
-    const safeFileName = path.basename(fileName);
+    const safeFileName = safeUploadBaseName(fileName);
+    if (!safeFileName) return res.status(400).json({ error: 'Invalid file name' });
     const partFilePath = path.join(TEMP_DIR, `${id}_${fileId}_${safeFileName}.part`);
+    if (!isResolvedPathInsideDir(TEMP_DIR, partFilePath)) {
+        await safeUnlink(req.file.path);
+        return res.status(400).json({ error: 'Invalid path' });
+    }
 
     try {
         const config = await getConfig();
@@ -2954,8 +3021,9 @@ apiRouter.post('/shares/:id/chunk', authenticateToken, uploadLimiter, chunkUploa
         const chunkData = await fs.readFile(req.file.path);
         const chunkLen = chunkData.length;
 
-        if (chunkHash) {
-            if (!/^[a-fA-F0-9]{64}$/.test(chunkHash)) {
+        const chunkHashStr = typeof chunkHash === 'string' ? chunkHash : '';
+        if (chunkHashStr) {
+            if (!/^[a-fA-F0-9]{64}$/.test(chunkHashStr)) {
                 await safeUnlink(req.file.path);
                 return res.status(400).json({ error: 'Invalid chunk hash format' });
             }
@@ -2963,7 +3031,7 @@ apiRouter.post('/shares/:id/chunk', authenticateToken, uploadLimiter, chunkUploa
             const crypto = await import('crypto');
             const hash = crypto.createHash('sha256').update(chunkData).digest('hex');
 
-            if (hash !== chunkHash.toLowerCase()) {
+            if (hash !== chunkHashStr.toLowerCase()) {
                 await safeUnlink(req.file.path);
                 return res.status(400).json({ error: 'Chunk hash mismatch - data corruption detected' });
             }
@@ -3097,12 +3165,16 @@ apiRouter.post('/shares/:id/finalize', authenticateToken, uploadLimiter, async (
         await client.query('BEGIN');
 
         for (const f of files) {
-            const safeFileName = path.basename(f.fileName);
+            const safeFileName = safeUploadBaseName(f.fileName);
+            if (!safeFileName) throw new Error(`Invalid file name for ${f.originalName || 'upload'}`);
             const safeExtension = path.extname(safeFileName);
             const finalPath = path.join(shareDir, crypto.randomBytes(8).toString('hex') + safeExtension);
 
             // Incremental Upload: Bestand is compleet in .part bestand
             const partPath = path.join(TEMP_DIR, `${id}_${f.fileId}_${safeFileName}.part`);
+            if (!isResolvedPathInsideDir(TEMP_DIR, partPath) || !isResolvedPathInsideDir(path.resolve(UPLOAD_DIR), finalPath)) {
+                throw new Error('Security error: invalid storage path');
+            }
 
             try {
                 // Rename direct naar final destination (Instant!)
@@ -3340,6 +3412,8 @@ apiRouter.put('/shares/:id', authenticateToken, uploadLimiter, checkUploadLimits
                 if (path.basename(sFile.tempId) !== sFile.tempId) continue;
 
                 const sourcePath = path.join(TEMP_DIR, sFile.tempId);
+                if (!isResolvedPathInsideDir(TEMP_DIR, sourcePath)) continue;
+
                 const safeExt = path.extname(sFile.originalName);
                 const finalName = crypto.randomBytes(8).toString('hex') + safeExt;
                 const destPath = path.join(shareDir, finalName);
@@ -3417,6 +3491,7 @@ apiRouter.post('/shares/:id/resend', authenticateToken, async (req, res) => {
 // STAGE: Bestanden samenvoegen in TEMP maar nog niet aan share koppelen (preview mogelijk maken)
 apiRouter.post('/shares/:id/stage', authenticateToken, uploadLimiter, async (req, res) => {
     const { id } = req.params;
+    if (!isValidId(id)) return res.status(400).json({ error: 'Invalid Share ID format' });
     const { files } = req.body; // Array of {fileName, fileId, size, mimeType}
     if (!Array.isArray(files) || files.length === 0) {
         return res.status(400).json({ error: 'Invalid or empty files data' });
@@ -3436,7 +3511,11 @@ apiRouter.post('/shares/:id/stage', authenticateToken, uploadLimiter, async (req
                 continue; // Skip invalid files
             }
 
-            const safeFileName = path.basename(f.fileName);
+            const safeFileName = safeUploadBaseName(f.fileName);
+            if (!safeFileName) {
+                console.error(`Invalid fileName in stage: ${f.fileName}`);
+                continue;
+            }
             // SECURITY: Generate a random ID to prevent file prediction/enumeration
             const randomId = crypto.randomBytes(16).toString('hex');
             const safeExt = path.extname(safeFileName);
@@ -3447,6 +3526,9 @@ apiRouter.post('/shares/:id/stage', authenticateToken, uploadLimiter, async (req
 
             // Zelfde als POST /shares/:id/chunk + finalize: één bestand …/id_fileId_name.part (geen mergeChunks .part_0/.part_1)
             const partPath = path.join(TEMP_DIR, `${id}_${f.fileId}_${safeFileName}.part`);
+            if (!isResolvedPathInsideDir(TEMP_DIR, partPath) || !isResolvedPathInsideDir(TEMP_DIR, finalPath)) {
+                throw new Error('Invalid temp path');
+            }
             try {
                 await fs.access(partPath);
             } catch {
@@ -4000,7 +4082,9 @@ apiRouter.post('/shares/:id/verify', loginLimiter, async (req, res) => {
 
     if (result.rows.length === 0) return res.status(404).json({ error: 'Not found' });
 
-    const valid = await Bun.password.verify(req.body.password, result.rows[0].password_hash);
+    const passwordShare = req.body?.password;
+    if (typeof passwordShare !== 'string') return res.status(400).json({ error: 'Invalid password' });
+    const valid = await Bun.password.verify(passwordShare, result.rows[0].password_hash);
 
     if (valid) {
         // Maak een token aan dat bewijst dat dit IP/User het wachtwoord kent voor DEZE share
@@ -4326,8 +4410,10 @@ apiRouter.all('/shares/:id/files/:fileId', downloadLimiter, shareFileHandler);
 
 // GUEST UPLOAD
 apiRouter.get('/public/reverse/:id', async (req, res) => {
+    const { id } = req.params;
+    if (!isValidId(id)) return res.status(400).json({ error: 'Invalid link ID format' });
     // Selecteer ook thank_you_message
-    const result = await pool.query('SELECT name, max_size, expires_at, password_hash, thank_you_message FROM reverse_shares WHERE id = $1', [req.params.id]);
+    const result = await pool.query('SELECT name, max_size, expires_at, password_hash, thank_you_message FROM reverse_shares WHERE id = $1', [id]);
     if (result.rows.length === 0) return res.status(404).json({ error: 'Not found' });
     const share = result.rows[0];
     if (share.expires_at && new Date() > new Date(share.expires_at)) return res.status(410).json({ error: 'Expired' });
@@ -4344,11 +4430,14 @@ apiRouter.get('/public/reverse/:id', async (req, res) => {
 
 apiRouter.post('/public/reverse/:id/verify', loginLimiter, async (req, res) => {
     const { id } = req.params;
+    if (!isValidId(id)) return res.status(400).json({ error: 'Invalid link ID format' });
     const result = await pool.query('SELECT password_hash FROM reverse_shares WHERE id = $1', [id]);
 
     if (result.rows.length === 0) return res.status(404).json({ error: 'Not found' });
 
-    const valid = await Bun.password.verify(req.body.password, result.rows[0].password_hash);
+    const passwordRev = req.body?.password;
+    if (typeof passwordRev !== 'string') return res.status(400).json({ error: 'Invalid password' });
+    const valid = await Bun.password.verify(passwordRev, result.rows[0].password_hash);
 
     if (valid) {
         // --- BEVEILIGING START ---
@@ -4376,6 +4465,7 @@ apiRouter.post('/public/reverse/:id/verify', loginLimiter, async (req, res) => {
 // STAP 1: Init Guest Upload
 apiRouter.post('/public/reverse/:id/init', checkUploadLimits, uploadLimiter, async (req, res) => {
     const { id } = req.params;
+    if (!isValidId(id)) return res.status(400).json({ error: 'Invalid link ID format' });
     const shareRes = await pool.query('SELECT * FROM reverse_shares WHERE id = $1', [id]);
     if (shareRes.rows.length === 0) return res.status(404).json({ error: 'Link not found' });
 
@@ -4401,14 +4491,25 @@ apiRouter.post('/public/reverse/:id/init', checkUploadLimits, uploadLimiter, asy
 // STAP 2: Chunk Guest Upload
 apiRouter.post('/public/reverse/:id/chunk', checkUploadLimits, uploadLimiter, chunkUploadPublic.single('chunk'), async (req, res) => {
     const { id } = req.params;
+    if (!isValidId(id)) return res.status(400).json({ error: 'Invalid reverse share ID format' });
     const { fileName, chunkIndex, fileId, chunkHash } = req.body;
     if (!isValidId(fileId)) return res.status(400).json({ error: 'Invalid File ID format' });
 
     if (!req.file) return res.status(400).json({ error: 'No data' });
 
+    if (!isPathUnderDir(TEMP_DIR, req.file.path)) {
+        await safeUnlink(req.file.path);
+        return res.status(400).json({ error: 'Invalid upload path' });
+    }
+
     // UNIEKE NAAM: Opslaan als .part bestand (één bestand dat groeit)
-    const safeFileName = path.basename(fileName);
+    const safeFileName = safeUploadBaseName(fileName);
+    if (!safeFileName) return res.status(400).json({ error: 'Invalid file name' });
     const partFilePath = path.join(TEMP_DIR, `rev_${id}_${fileId}_${safeFileName}.part`);
+    if (!isResolvedPathInsideDir(TEMP_DIR, partFilePath)) {
+        await safeUnlink(req.file.path);
+        return res.status(400).json({ error: 'Invalid path' });
+    }
 
     try {
         // 2. Database checks (Quota & Validiteit & PASSWORD)
@@ -4451,8 +4552,9 @@ apiRouter.post('/public/reverse/:id/chunk', checkUploadLimits, uploadLimiter, ch
 
         const chunkData = await fs.readFile(req.file.path);
 
-        if (chunkHash) {
-            if (!/^[a-fA-F0-9]{64}$/.test(chunkHash)) {
+        const chunkHashStrGuest = typeof chunkHash === 'string' ? chunkHash : '';
+        if (chunkHashStrGuest) {
+            if (!/^[a-fA-F0-9]{64}$/.test(chunkHashStrGuest)) {
                 await safeUnlink(req.file.path);
                 return res.status(400).json({ error: 'Invalid chunk hash format' });
             }
@@ -4460,7 +4562,7 @@ apiRouter.post('/public/reverse/:id/chunk', checkUploadLimits, uploadLimiter, ch
             const cryptoMod = await import('crypto');
             const hash = cryptoMod.createHash('sha256').update(chunkData).digest('hex');
 
-            if (hash !== chunkHash.toLowerCase()) {
+            if (hash !== chunkHashStrGuest.toLowerCase()) {
                 await safeUnlink(req.file.path);
                 return res.status(400).json({ error: 'Chunk hash mismatch - data corruption detected' });
             }
@@ -4597,9 +4699,13 @@ apiRouter.post('/public/reverse/:id/finalize', uploadLimiter, async (req, res) =
             const finalPath = path.join(GUEST_DIR, uniqueName);
 
             // Voeg samen (Rename .part file)
-            const safeChunkName = path.basename(f.fileName);
+            const safeChunkName = safeUploadBaseName(f.fileName);
+            if (!safeChunkName) throw new Error(`Invalid file name for ${f.originalName || 'upload'}`);
             // Prefix for guest: rev_id_fileId_safeChunkName
             const partPath = path.join(TEMP_DIR, `rev_${id}_${f.fileId}_${safeChunkName}.part`);
+            if (!isResolvedPathInsideDir(TEMP_DIR, partPath) || !isResolvedPathInsideDir(path.resolve(UPLOAD_DIR, 'guest_uploads'), finalPath)) {
+                throw new Error('Security error: invalid storage path');
+            }
 
             try {
                 await fs.rename(partPath, finalPath);
